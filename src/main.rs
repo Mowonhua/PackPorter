@@ -1,88 +1,26 @@
-// 文件职责：应用入口（桌面程序）：初始化 Slint UI、加载配置、装配服务层。
-
-// 引入 Slint 生成的 UI 绑定（由 build.rs 编译 ui/packporter.slint 生成）。
-slint::include_modules!();
+// 文件职责：应用入口（桌面程序）：创建主窗口、装配交互回调并进入事件循环。
 
 use packporter::app_config::AppConfig;
-use packporter::domain::error::PackError;
+use packporter::app_controller::attach;
 use packporter::services::folder_watcher::{FolderWatcherService, InstanceArrivalEvent};
-use packporter::services::migration_service::MigrationService;
-use std::path::PathBuf;
+use packporter::PackPorterWindow;
+use slint::ComponentHandle;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 fn main() {
-    // 加载持久化配置（缺失/损坏自动回退默认值）。
+    // 加载持久化配置（缺失/损坏自动回退默认值），versions 路径供扫描与监控共用。
     let config = AppConfig::load();
+    let watcher_root = PathBuf::from(&config.versions_dir);
 
-    // 构造 UI。
+    // 创建 UI 并把全部交互回调装配到服务层（扫描/计划/执行/打开备份目录）。
     let ui = PackPorterWindow::new().expect("UI 创建失败");
-    let weak = ui.as_weak();
-
-    // 服务层装配：versions 根目录来自配置（可能为空，扫描时校验）。
-    let versions_root = Arc::new(Mutex::new(PathBuf::from(&config.versions_dir)));
-    let migration = Arc::new(Mutex::new(Option::<Arc<Mutex<MigrationService>>>::None));
-
-    // 配置回填 UI 初始状态。
-    ui.set_lock_warning_visible(false);
-
-    // 扫描请求：用当前 versions 根目录重建服务并填充实例列表。
-    let weak_scan = weak.clone();
-    let root_slot = versions_root.clone();
-    let migration_slot = migration.clone();
-    ui.on_scan_requested(move || {
-        let ui = weak_scan.unwrap();
-        let root = root_slot.lock().unwrap().clone();
-        if root.as_os_str().is_empty() {
-            append_log(&ui, "未配置 versions 目录，请先在配置中选择。");
-            return;
-        }
-        let service = MigrationService::new(root);
-        match service.instances.scan_instances() {
-            Ok(profiles) => {
-                let names: Vec<slint::SharedString> = profiles
-                    .iter()
-                    .map(|p| slint::SharedString::from(p.version.dir_name.as_str()))
-                    .collect();
-                ui.set_instance_names(slint::ModelRc::from(std::rc::Rc::new(
-                    slint::VecModel::from(names),
-                )));
-                append_log(&ui, &format!("扫描完成，发现 {} 个实例。", profiles.len()));
-                // 缓存服务实例供后续计划/执行复用。
-                *migration_slot.lock().unwrap() = Some(Arc::new(Mutex::new(service)));
-            }
-            Err(e) => append_log(&ui, &format!("扫描失败：{e}")),
-        }
-    });
-
-    // 迁移执行请求：确认后进入事务执行，进度回写 UI。
-    let weak_exec = weak.clone();
-    let migration_exec = migration.clone();
-    ui.on_execute_requested(move || {
-        let ui = weak_exec.unwrap();
-        let Some(service_mutex) = migration_exec.lock().unwrap().clone() else {
-            append_log(&ui, "请先扫描实例。");
-            return;
-        };
-        let service = service_mutex.lock().unwrap();
-        // 演示装配：扫描阶段缓存最近一次计划；此处直接以配置路径生成计划。
-        // 计划生成与执行的完整参数绑定在 UI 状态接线完成后替换。
-        append_log(&ui, "迁移执行流程已装配（计划生成待 UI 状态接线）。");
-        let _ = &service;
-    });
-
-    // 打开备份目录请求：定位目标实例 backups 目录。
-    let weak_open = weak.clone();
-    ui.on_open_backup_folder(move || {
-        let ui = weak_open.unwrap();
-        append_log(&ui, "备份目录定位待 UI 状态接线。");
-        let _ = ui;
-    });
+    let _handles = attach(&ui, watcher_root.clone());
 
     // 目录监控（模块 D）：对配置的 versions 根目录启动感知。
-    let watcher_root = versions_root.lock().unwrap().clone();
     if !watcher_root.as_os_str().is_empty() {
-        spawn_watcher(&watcher_root, weak.clone());
+        spawn_watcher(&watcher_root, ui.as_weak());
     }
 
     ui.run().expect("UI 事件循环异常退出");
@@ -95,7 +33,7 @@ fn main() {
  * 实现思路：FolderWatcherService + 后台线程非阻塞接收事件，
  *           收到事件后通过 slint::invoke_from_event_loop 回主线程更新。
  */
-fn spawn_watcher(root: &std::path::Path, weak: slint::Weak<PackPorterWindow>) {
+fn spawn_watcher(root: &Path, weak: slint::Weak<PackPorterWindow>) {
     let probe = Arc::new(packporter::infra::watcher::SnapshotProbe);
     let (mut watcher, rx) = FolderWatcherService::new(root.to_path_buf(), probe);
     if watcher.start().is_err() {
@@ -118,7 +56,7 @@ fn spawn_watcher(root: &std::path::Path, weak: slint::Weak<PackPorterWindow>) {
 }
 
 /**
- * 函数职责：向 UI 日志区追加一行日志。
+ * 函数职责：向 UI 日志区追加一行日志（监控线程复用）。
  * 输入说明：ui 为窗口引用；message 为日志文本。
  * 输出说明：副作用为更新 log-text 属性。
  * 实现思路：读取现有日志，追加换行与新内容后写回。
@@ -126,10 +64,4 @@ fn spawn_watcher(root: &std::path::Path, weak: slint::Weak<PackPorterWindow>) {
 fn append_log(ui: &PackPorterWindow, message: &str) {
     let existing = ui.get_log_text().to_string();
     ui.set_log_text(std::format!("{}{}\n", existing, message).into());
-}
-
-// 未确认错误统一转日志文案的辅助（供后续 UI 接线复用）。
-#[allow(dead_code)]
-fn describe_error(err: &PackError) -> String {
-    format!("{err}")
 }

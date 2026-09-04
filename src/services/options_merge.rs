@@ -19,7 +19,10 @@ pub const SOUND_PREFIX: &str = "soundCategory_";
 pub const VIEW_PREFIXES: &[&str] = &["fov", "gamma", "guiScale", "renderDistance", "maxFps"];
 
 /// 语言与可访问性等纯客户端偏好键（完整键名）。
-pub const PREFERENCE_KEYS: &[&str] = &["lang", "fullscreen", "pauseOnLostFocus", "narrator"];
+/// 语言键为 `language`（Minecraft options.txt 实际键名）；
+/// `lang` 为历史遗留写法，保留兼容旧配置但游戏不识别。
+pub const PREFERENCE_KEYS: &[&str] =
+    &["language", "lang", "fullscreen", "pauseOnLostFocus", "narrator"];
 
 // ==================== 数据结构、值对象和 DTO ====================
 

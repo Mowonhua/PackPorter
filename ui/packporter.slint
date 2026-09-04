@@ -1,9 +1,42 @@
 /**
- * 文件职责：主窗口 UI 的静态骨架：布局、控件树与占位文案。
- * 定义范围：组件结构、属性声明与回调签名；不含业务渲染逻辑与交互行为。
+ * 文件职责：主窗口 UI：布局、控件树与交互接线。
+ * 定义范围：组件结构、属性声明、控件事件与回调的绑定关系、计划明细行组件；
+ *           交互的业务逻辑全部由 Rust 侧回调实现，UI 不承载迁移规则。
  */
 
 import { Button, ComboBox, ListView } from "std-widgets.slint";
+
+// 计划预览列表的单行数据，由 Rust 侧从迁移计划构建。
+export struct PlanEntryView {
+    /// 资产相对路径。
+    path: string,
+    /// 资产级别标签（L1-L4）。
+    level-label: string,
+    /// 动作统计标签（复制数/保留数/合并键数）。
+    action-label: string,
+    /// 条目内文件或键位数量（含单位，Rust 侧格式化）。
+    item-count: string,
+}
+
+// 计划明细行：固定高度，供 ListView 逐条渲染。
+component PlanRow inherits Rectangle {
+    in property <PlanEntryView> entry;
+    height: 30px;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text { text: entry.level-label; min-width: 110px; vertical-alignment: center; }
+        Text {
+            text: entry.path;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text { text: entry.item-count; min-width: 70px; horizontal-alignment: right; vertical-alignment: center; }
+        Text { text: entry.action-label; min-width: 170px; vertical-alignment: center; }
+    }
+}
 
 // 主窗口：向导式布局（选择实例 → 计划预览 → 执行进度 → 完成）。
 export component PackPorterWindow inherits Window {
@@ -15,12 +48,14 @@ export component PackPorterWindow inherits Window {
 
     // 实例列表条目（目录名展示），由服务层扫描后填充。
     in-out property <[string]> instance-names: [];
-    // 源实例在下拉框中的索引。
+    // 源实例在下拉框中的索引；-1 表示未选择。
     in-out property <int> source-index: -1;
-    // 目标实例在下拉框中的索引。
+    // 目标实例在下拉框中的索引；-1 表示未选择。
     in-out property <int> target-index: -1;
-    // 计划摘要文案（各级资产统计）。
+    // 计划摘要文案（源/目标、规则数与备份目录）。
     in-out property <string> plan-summary: "";
+    // 计划预览明细行（每条资产规则一行）。
+    in-out property <[PlanEntryView]> plan-entries: [];
     // 进度百分比 0-100；-1 表示不确定态。
     in-out property <int> progress-percent: -1;
     // 进度区域当前动作描述。
@@ -41,45 +76,69 @@ export component PackPorterWindow inherits Window {
     // 请求打开备份目录。
     callback open-backup-folder();
 
-    // ==================== 布局骨架 ====================
+    // ==================== 布局与交互接线 ====================
 
     VerticalLayout {
         padding: 16px;
         spacing: 12px;
 
-        // 顶部：versions 路径与实例选择。
+        // 顶部：源/目标实例选择与扫描、计划按钮。
         HorizontalLayout {
             spacing: 8px;
+            Text { text: "源实例:"; vertical-alignment: center; }
             ComboBox {
-                min-width: 280px;
+                min-width: 220px;
+                // 模型由扫描回调填充；选中索引双向同步，保证 UI 选中与 Rust 状态一致。
                 model: root.instance-names;
+                current-index <=> root.source-index;
             }
-            Button { text: "扫描实例"; }
-            Button { text: "生成迁移计划"; }
+            Text { text: "目标实例:"; vertical-alignment: center; }
+            ComboBox {
+                min-width: 220px;
+                model: root.instance-names;
+                current-index <=> root.target-index;
+            }
+            Button { text: "扫描实例"; clicked => { root.scan-requested(); } }
+            Button { text: "生成迁移计划"; clicked => { root.plan-requested(); } }
         }
 
-        // 计划预览区：各级统计与决策明细。
+        // 计划预览区：摘要 + 各规则决策明细。
         Rectangle {
             border-width: 1px;
             border-color: #d0d0d0;
             border-radius: 6px;
-            ListView {
-                // 决策明细列表，实现阶段绑定逐项数据。
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                Text { text: root.plan-summary; wrap: word-wrap; }
+                ListView {
+                    vertical-stretch: 1;
+                    for e in root.plan-entries: PlanRow {
+                        entry: e;
+                    }
+                }
             }
         }
 
-        // 进度与日志区。
+        // 进度与日志区（含实例占用警告）。
         VerticalLayout {
             spacing: 4px;
+            Text {
+                text: "检测到实例正被运行中的游戏进程占用，迁移已被阻断。请关闭对应游戏后重试。";
+                color: #b91c1c;
+                visible: root.lock-warning-visible;
+                wrap: word-wrap;
+            }
             Text { text: root.progress-text; }
-            Text { text: root.log-text; }
+            Text { text: root.log-text; wrap: word-wrap; }
         }
 
         // 底部操作条。
         HorizontalLayout {
             spacing: 8px;
-            Button { text: "开始迁移"; }
-            Button { text: "打开备份目录"; }
+            Button { text: "开始迁移"; clicked => { root.execute-requested(); } }
+            Button { text: "打开备份目录"; clicked => { root.open-backup-folder(); } }
         }
     }
 }

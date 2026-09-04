@@ -26,6 +26,12 @@ walkdir = "2"
 [build-dependencies]
 slint-build = "1"
 
+# UI 回调集成测试：以独立程序运行（harness = false），
+# 在主线程持有 Slint 事件循环，直接驱动真实回调并自检退出码。
+[[test]]
+name = "ui_wiring"
+harness = false
+
 [profile.release]
 lto = true
 strip = true

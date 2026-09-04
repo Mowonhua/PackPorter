@@ -51,14 +51,22 @@ impl BackupEngine {
         plan: &MigrationPlan,
         progress: &mut dyn FnMut(MigrationProgress),
     ) -> PackResult<PathBuf> {
-        // 收集将被覆盖的既有目标文件（CopyFile/WriteText 目标中已存在的部分）。
-        let targets = plan
+        // 收集将被覆盖的既有目标文件（CopyFile 目标中已存在的部分）。
+        let mut targets = plan
             .entries
             .iter()
             .flat_map(|entry| entry.decisions.iter())
             .map(|decision| plan.target.root_dir.join(&decision.relative_path))
             .filter(|p| p.is_file())
             .collect::<Vec<_>>();
+
+        // L4 合并同样覆盖写入既有 options.txt，必须纳入备份范围。
+        if plan.options_result.is_some() {
+            let options_path = plan.target.root_dir.join("options.txt");
+            if options_path.is_file() && !targets.contains(&options_path) {
+                targets.push(options_path);
+            }
+        }
 
         // 全部为新建（新实例无既有文件）时无需备份。
         if targets.is_empty() {
