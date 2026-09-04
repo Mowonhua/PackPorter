@@ -1,0 +1,31 @@
+[package]
+name = "packporter"
+version = "0.1.0"
+edition = "2021"
+description = "Minecraft 整合包平滑迁移工具：将旧版本实例的个人资产安全迁移到新版本实例"
+
+[dependencies]
+# UI 框架：声明式 UI，编译期生成 Rust 绑定
+slint = "1"
+# 序列化：版本 profile 解析、事务日志、应用配置持久化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 轻量 Zip 镜像备份（仅 deflate，减少编译体积）
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# 目录监控（模块 D：versions/ 目录感知）
+notify = "8"
+# 进程枚举（模块 A：javaw.exe 占用检测）
+sysinfo = "0.33"
+# 错误类型派生
+thiserror = "2"
+# 备份目录时间戳命名
+chrono = { version = "0.4", features = ["clock"] }
+# 递归目录遍历（迁移计划扫描）
+walkdir = "2"
+
+[build-dependencies]
+slint-build = "1"
+
+[profile.release]
+lto = true
+strip = true

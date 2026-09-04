@@ -1,0 +1,85 @@
+/**
+ * 文件职责：主窗口 UI 的静态骨架：布局、控件树与占位文案。
+ * 定义范围：组件结构、属性声明与回调签名；不含业务渲染逻辑与交互行为。
+ */
+
+import { Button, ComboBox, ListView } from "std-widgets.slint";
+
+// 主窗口：向导式布局（选择实例 → 计划预览 → 执行进度 → 完成）。
+export component PackPorterWindow inherits Window {
+    title: "PackPorter —— 整合包平滑迁移";
+    preferred-width: 900px;
+    preferred-height: 640px;
+
+    // ==================== 属性声明 ====================
+
+    // 实例列表条目（目录名展示），由服务层扫描后填充。
+    in-out property <[string]> instance-names: [];
+    // 源实例在下拉框中的索引。
+    in-out property <int> source-index: -1;
+    // 目标实例在下拉框中的索引。
+    in-out property <int> target-index: -1;
+    // 计划摘要文案（各级资产统计）。
+    in-out property <string> plan-summary: "";
+    // 进度百分比 0-100；-1 表示不确定态。
+    in-out property <int> progress-percent: -1;
+    // 进度区域当前动作描述。
+    in-out property <string> progress-text: "";
+    // 日志区内容（追加式）。
+    in-out property <string> log-text: "";
+    // 占用警告是否可见（阻断迁移）。
+    in-out property <bool> lock-warning-visible: false;
+
+    // ==================== 回调声明 ====================
+
+    // 请求扫描 versions/ 实例列表。
+    callback scan-requested();
+    // 请求生成迁移计划（源/目标选定后）。
+    callback plan-requested();
+    // 请求执行迁移（用户在预览页确认后）。
+    callback execute-requested();
+    // 请求打开备份目录。
+    callback open-backup-folder();
+
+    // ==================== 布局骨架 ====================
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        // 顶部：versions 路径与实例选择。
+        HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                min-width: 280px;
+                model: root.instance-names;
+            }
+            Button { text: "扫描实例"; }
+            Button { text: "生成迁移计划"; }
+        }
+
+        // 计划预览区：各级统计与决策明细。
+        Rectangle {
+            border-width: 1px;
+            border-color: #d0d0d0;
+            border-radius: 6px;
+            ListView {
+                // 决策明细列表，实现阶段绑定逐项数据。
+            }
+        }
+
+        // 进度与日志区。
+        VerticalLayout {
+            spacing: 4px;
+            Text { text: root.progress-text; }
+            Text { text: root.log-text; }
+        }
+
+        // 底部操作条。
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "开始迁移"; }
+            Button { text: "打开备份目录"; }
+        }
+    }
+}
