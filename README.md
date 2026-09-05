@@ -53,6 +53,18 @@ cargo build --release
 
 Windows 产物为 `target/release/packporter.exe`。应用图标已嵌入程序，无需额外分发图片。
 
+设置中点击**关联启动器…**，选择 PCL2 / HMCL 的 `.exe`，开启联动并保存。保存前的选择只是草稿；保存成功后原文件备份为同目录的 `xxx.bak.exe`，原 `xxx.exe` 路径由 shim 接管。因此直接双击原路径、使用已有快捷方式或命令行都能联动。可关联多个启动器，最后一个关联启动器退出后 PackPorter 自动关闭，迁移和设置保存会先完成。
+
+**关闭联动并保存会自动还原全部已关联启动器**，选择过的路径会保留，便于再次开启；从列表移除某个入口并保存也会还原该入口。已有同名 `.bak.exe`、文件被占用或入口被更新等冲突会明确报错，不能用旧备份覆盖未知的新文件。请先解除关联再移动工具或启动器。
+
+请将 `packporter-shim.exe` 与 `packporter.exe` 放在同一目录。原路径 shim 转交启动任务后立即退出，中央 shim 只在启动器会话期间运行，不添加登录启动项，也不在空闲时常驻。HMCL 派生的 Java 启动器进程会继续被跟踪；关闭联动不会终止启动器或运行中的 Minecraft 游戏。
+
+原路径接管只支持 EXE。JAR 可继续使用独立命令行入口，默认通过 `PATH` 中的 `javaw.exe` 启动；`--` 后的参数原样传给启动器：
+
+```powershell
+.\packporter-shim.exe --launcher "D:\Minecraft\HMCL.jar" --java "D:\Java\bin\javaw.exe" -- <启动器参数>
+```
+
 ## 迁移哪些内容
 
 以下是首次使用的默认规则；在设置页各级的「配置」入口可修改路径。

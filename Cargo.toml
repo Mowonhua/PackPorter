@@ -2,6 +2,7 @@
 name = "packporter"
 version = "0.1.0-alpha.1"
 edition = "2021"
+default-run = "packporter"
 description = "Minecraft 整合包平滑迁移工具：将旧版本实例的个人资产安全迁移到新版本实例"
 
 [dependencies]
@@ -13,6 +14,7 @@ raw-window-handle = "0.6"
 # 序列化：版本 profile 解析、事务日志、应用配置持久化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 # 轻量 Zip 镜像备份（仅 deflate，减少编译体积）
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # 目录监控（模块 D：versions/ 目录感知）
@@ -32,6 +34,11 @@ rfd = { version = "0.15", default-features = false }
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",

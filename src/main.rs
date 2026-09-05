@@ -1,6 +1,9 @@
 // 文件职责：应用入口（桌面程序）：创建主窗口、装配交互回调并进入事件循环。
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
-use packporter::app_controller::{attach, WatcherRestartHook};
+use packporter::app_controller::{attach_with_launcher_hook, WatcherRestartHook};
+use packporter::domain::launcher_lifecycle::LauncherWindowLifecycle;
+use packporter::infra::launcher_companion;
 use packporter::infra::watcher::SnapshotProbe;
 use packporter::services::folder_watcher::{FolderWatcherService, InstanceArrivalEvent};
 use packporter::PackPorterWindow;
@@ -10,6 +13,28 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let followed = args.iter().any(|arg| arg == "--launcher-follow");
+    // 兼容旧版登录命令：只移除遗留启动项并退出，不再驻留等待启动器。
+    if args.iter().any(|arg| arg == "--launcher-monitor") {
+        if let Err(error) = launcher_companion::cleanup_legacy_startup() {
+            eprintln!("旧版登录启动项清理失败：{error}");
+        }
+        return;
+    }
+    let instance = if followed {
+        launcher_companion::acquire_followed_ui_instance()
+    } else {
+        launcher_companion::acquire_ui_instance()
+    };
+    let _instance = match instance {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("无法获取应用实例锁：{error}");
+            return;
+        }
+    };
     // 加载持久化配置（缺失/损坏自动回退默认值），versions 路径供扫描与监控共用。
     let config = packporter::app_config::AppConfig::load();
     let watcher_root = PathBuf::from(&config.versions_dir);
@@ -18,7 +43,40 @@ fn main() {
     let ui = PackPorterWindow::new().expect("UI 创建失败");
     let watcher_state: Arc<Mutex<Option<ActiveWatcher>>> = Arc::new(Mutex::new(None));
     let hook = make_restart_hook(ui.as_weak(), watcher_state.clone());
-    let _handles = attach(&ui, watcher_root.clone(), hook);
+    let _handles = attach_with_launcher_hook(
+        &ui,
+        watcher_root.clone(),
+        hook,
+        Arc::new(|enabled, paths| {
+            launcher_companion::cleanup_legacy_startup()?;
+            packporter::infra::launcher_binding::apply(enabled, paths)
+        }),
+    );
+    let weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        // 配置保存和启动器选择必须完整收尾，不能随关闭窗口中断操作。
+        if weak.upgrade().is_some_and(|ui| ui.get_settings_saving() || ui.get_launcher_selecting()) {
+            slint::CloseRequestResponse::KeepWindowShown
+        } else {
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+    let _launcher_timer = install_launcher_lifecycle(
+        ui.as_weak(),
+        followed,
+    );
+    // 升级后清除本工具的旧登录项；shim 模式不注册任何常驻监听入口。
+    if !followed {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            if let Err(error) = launcher_companion::cleanup_legacy_startup() {
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_status_kind("error".into());
+                    ui.set_status_text(format!("旧版登录启动项清理失败：{error}").into());
+                });
+            }
+        });
+    }
 
     // 目录监控（模块 D）：对配置的 versions 根目录启动感知；设置页改目录时经钩子重启。
     // notify 的 watch 在 Windows 上会同步等待内部线程应答（无超时 recv），
@@ -34,6 +92,56 @@ fn main() {
     install_frameless_chrome(ui.as_weak());
 
     ui.run().expect("UI 事件循环异常退出");
+}
+
+/**
+ * 函数职责：把 shim 注册的启动器会话接入窗口生命周期。
+ * 输入说明：weak 为主窗口；followed 表示由 shim 拉起，首次空会话也应关闭。
+ * 输出说明：返回须持有至事件循环退出的定时器；仅在无迁移、启动器选择和设置保存任务时退出。
+ * 实现思路：后台查询已注册会话，主线程按生效开关决定退出；查询失败不视为退出。
+ */
+fn install_launcher_lifecycle(
+    weak: slint::Weak<PackPorterWindow>,
+    followed: bool,
+) -> slint::Timer {
+    let latest = Arc::new(Mutex::new(None));
+    let sampler = Arc::downgrade(&latest);
+    std::thread::spawn(move || while let Some(slot) = sampler.upgrade() {
+        // UI 忙碌期间覆盖旧快照，避免恢复后消费积压的“全部退出”。
+        let snapshot = launcher_companion::launcher_count();
+        *slot.lock().unwrap() = Some(snapshot);
+        drop(slot);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    });
+    let timer = slint::Timer::default();
+    let mut lifecycle = LauncherWindowLifecycle::new(followed);
+    let mut settings_revision = 0;
+    timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(250),
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let revision = ui.get_launcher_follow_revision();
+            if revision != settings_revision {
+                lifecycle = LauncherWindowLifecycle::new(false);
+                settings_revision = revision;
+            }
+            if !ui.get_launcher_follow_enabled() {
+                lifecycle.observe(false, 0, false);
+                return;
+            }
+            let Some(snapshot) = latest.lock().unwrap().take() else { return };
+            let Ok(count) = snapshot else { return };
+            if lifecycle.observe(
+                ui.get_launcher_follow_enabled(),
+                count,
+                ui.get_busy() || ui.get_executing() || ui.get_settings_saving() || ui.get_launcher_selecting(),
+            ) {
+                let _ = slint::quit_event_loop();
+            }
+        },
+    );
+    timer
 }
 
 /**

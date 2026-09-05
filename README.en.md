@@ -55,6 +55,18 @@ cargo build --release
 
 The Windows executable is `target/release/packporter.exe`. The application icon is embedded, so no separate image files need to be distributed.
 
+Select **关联启动器…** in Settings, choose a PCL2/HMCL executable, enable following, and save. Selection remains a draft until saved. Installation preserves the original as `xxx.bak.exe` in the same directory and places the shim at `xxx.exe`, so existing shortcuts, direct double-clicks, and command lines activate following. Multiple launchers are supported; PackPorter closes after the last linked launcher exits, waiting for migration and settings saves.
+
+**Disabling following and saving restores every linked executable automatically.** Selected paths are retained for re-enabling; removing one path and saving restores that entry. Existing `.bak.exe` files, locked files, or externally updated launchers produce an error instead of overwriting unknown files with an old backup. Remove the association before moving either application.
+
+Keep `packporter-shim.exe` beside `packporter.exe`. The shim at the original path exits immediately after handing off to the central shim, which runs only during launcher sessions. There is no sign-in entry or idle monitor. HMCL's Java launcher descendants remain tracked; restoring executable paths does not terminate launchers or Minecraft games.
+
+Original-path installation supports EXE files. JAR launchers can still use the standalone command line, with `javaw.exe` from `PATH` by default. Arguments after `--` are forwarded to the launcher:
+
+```powershell
+.\packporter-shim.exe --launcher "D:\Minecraft\HMCL.jar" --java "D:\Java\bin\javaw.exe" -- <launcher arguments>
+```
+
 ## What gets migrated
 
 These are the defaults for first use. You can edit paths through **Configure (配置)** for each level in Settings.

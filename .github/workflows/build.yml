@@ -64,7 +64,12 @@ jobs:
         # 静态链接 MSVC 运行库，使分发包无需另行安装 VC++ Redistributable。
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc --bin packporter
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+
+      - name: Test shim launcher sessions
+        env:
+          SLINT_BACKEND: winit-software
+        run: pwsh -File tests/check_launcher_runtime.ps1 -Executable target/x86_64-pc-windows-msvc/release/packporter.exe
 
       - name: Package
         env:
@@ -73,7 +78,7 @@ jobs:
           $packageName = "packporter-v$env:PACKAGE_VERSION-windows-x86_64"
           $packageDir = Join-Path $env:RUNNER_TEMP $packageName
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/packporter.exe, LICENSE -Destination $packageDir
+          Copy-Item target/x86_64-pc-windows-msvc/release/packporter.exe, target/x86_64-pc-windows-msvc/release/packporter-shim.exe, LICENSE -Destination $packageDir
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $archive = "dist/$packageName.zip"
           Compress-Archive -Path "$packageDir/*" -DestinationPath $archive -Force

@@ -12,7 +12,7 @@ use crate::domain::merge::{MergeAction, OptionsMergeMode};
 use crate::domain::rules::{normalize_rule_path, rules_conflict};
 use crate::services::migration_service::MigrationService;
 use crate::{PlanEntryView, PackPorterWindow, RuleEditorApi, RuleRowView};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,33 @@ type WorkingRulesSlot = Arc<Mutex<Vec<UserRuleEntry>>>;
 
 // versions 目录变更时重启目录监控的钩子（由入口层注入，测试可传空实现）。
 pub type WatcherRestartHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/**
+ * 接口职责：应用原路径启动器关联或恢复原启动器。
+ * 调用方：设置控制器在后台线程持久化新配置后调用。
+ * 实现要求：开启时安装所选路径的 shim，关闭时恢复全部原入口；失败返回错误并保持原关联状态。
+ */
+pub type LauncherSettingsHook = Arc<dyn Fn(bool, &[String]) -> Result<(), String> + Send + Sync>;
+
+/**
+ * 接口职责：选择需要关联的启动器 EXE。
+ * 调用方：设置控制器在后台线程调用，测试可注入无系统副作用的实现。
+ * 实现要求：成功返回启动器路径，取消返回 None；不得写入启动器文件或访问 UI。
+ */
+pub type LauncherSelectHook = Arc<dyn Fn() -> Result<Option<PathBuf>, String> + Send + Sync>;
+
+/**
+ * 函数职责：选择可在原路径接管的启动器 EXE。
+ * 输入说明：在后台线程调用，避免阻塞 Slint 事件循环。
+ * 输出说明：选择返回路径，取消返回 None；不修改任何文件。
+ * 实现思路：原生文件选择器只接受 exe，安装由保存设置统一触发。
+ */
+fn choose_launcher() -> Result<Option<PathBuf>, String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("选择 PCL2 / HMCL 启动器 EXE")
+        .add_filter("Windows 启动器", &["exe"])
+        .pick_file())
+}
 
 /**
  * 结构职责：attach 装配的共享上下文：全部回调共用的状态槽与标志位。
@@ -55,6 +82,8 @@ struct ControllerCtx {
     working_rules: WorkingRulesSlot,
     /// versions 目录变更钩子。
     watcher_hook: WatcherRestartHook,
+    /// 后台启动器关联与恢复适配器；UI 不依赖平台实现。
+    launcher_hook: LauncherSettingsHook,
 }
 
 /**
@@ -87,7 +116,42 @@ pub fn attach(
     versions_root: PathBuf,
     watcher_hook: WatcherRestartHook,
 ) -> ControllerHandles {
+    // 默认装配不执行启动器系统操作；桌面入口显式注入原生适配器。
+    attach_with_launcher_hooks(ui, versions_root, watcher_hook,
+        Arc::new(|_, _| Ok(())), Arc::new(|| Ok(None)))
+}
+
+/**
+ * 函数职责：注入启动器设置适配器并装配原生启动器选择。
+ * 输入说明：launcher_hook 不得访问 UI，允许执行阻塞系统调用。
+ * 输出说明：返回控制器状态槽；保存失败保留草稿并恢复旧配置。
+ * 实现思路：后台保存配置并应用启动器关联，成功后提交生效状态。
+ */
+pub fn attach_with_launcher_hook(
+    ui: &PackPorterWindow,
+    versions_root: PathBuf,
+    watcher_hook: WatcherRestartHook,
+    launcher_hook: LauncherSettingsHook,
+) -> ControllerHandles {
+    attach_with_launcher_hooks(ui, versions_root, watcher_hook, launcher_hook,
+        Arc::new(choose_launcher))
+}
+
+/**
+ * 函数职责：装配启动器设置与启动器选择适配器。
+ * 输入说明：两个适配器均在后台线程调用，不得直接访问 UI。
+ * 输出说明：返回共享状态槽；取消选择不改变持久化设置。
+ * 实现思路：沿用设置装配，以独立状态标志阻止启动器选择重入及迁移交错。
+ */
+pub fn attach_with_launcher_hooks(
+    ui: &PackPorterWindow,
+    versions_root: PathBuf,
+    watcher_hook: WatcherRestartHook,
+    launcher_hook: LauncherSettingsHook,
+    selection_hook: LauncherSelectHook,
+) -> ControllerHandles {
     let config = Arc::new(Mutex::new(AppConfig::load()));
+    ui.set_launcher_follow_enabled(config.lock().unwrap().follow_launchers);
     // 未配置目录时给出指向设置页的引导，而不是提示改配置文件。
     ui.set_has_versions_dir(!versions_root.as_os_str().is_empty());
     if versions_root.as_os_str().is_empty() {
@@ -104,6 +168,48 @@ pub fn attach(
         plan: Arc::new(Mutex::new(None)),
         working_rules: Arc::new(Mutex::new(Vec::new())),
         watcher_hook,
+        launcher_hook,
+    });
+
+    let weak = ui.as_weak();
+    let ctx_select = ctx.clone();
+    ui.on_select_launcher(move || {
+        let ui = weak.unwrap();
+        if ui.get_settings_saving() || ui.get_executing() || ui.get_launcher_selecting() { return; }
+        ui.set_launcher_selecting(true);
+        set_status(&ui, "info", "请选择要关联的启动器 EXE…");
+        let select = selection_hook.clone();
+        let ctx_bg = ctx_select.clone();
+        let weak_bg = weak.clone();
+        // 原生对话框仅产生草稿；保存与页面切换等待其收尾，避免迟到结果污染下一次编辑。
+        std::thread::spawn(move || {
+            let result = select();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak_bg.upgrade() else { return; };
+                ui.set_launcher_selecting(false);
+                match result {
+                    Ok(Some(path)) => {
+                        let mut paths: Vec<String> = ui.get_settings_launcher_paths().iter().map(|p| p.to_string()).collect();
+                        let path = path.to_string_lossy().into_owned();
+                        if !paths.iter().any(|p| p.eq_ignore_ascii_case(&path)) { paths.push(path.clone()); }
+                        set_launcher_paths(&ui, &ctx_bg, paths);
+                        set_status(&ui, "success", &format!("已选择 {path}；保存设置后应用关联。"));
+                    }
+                    Ok(None) => set_status(&ui, "info", "已取消选择启动器。"),
+                    Err(error) => set_status(&ui, "error", &format!("启动器选择失败：{error}")),
+                }
+            });
+        });
+    });
+    let weak = ui.as_weak();
+    let ctx_remove = ctx.clone();
+    ui.on_remove_launcher(move |index| {
+        let ui = weak.unwrap();
+        if ui.get_settings_saving() || ui.get_executing() || ui.get_launcher_selecting() { return; }
+        let mut paths: Vec<String> = ui.get_settings_launcher_paths().iter().map(|p| p.to_string()).collect();
+        if index < 0 || index as usize >= paths.len() { return; }
+        paths.remove(index as usize);
+        set_launcher_paths(&ui, &ctx_remove, paths);
     });
 
     // ==================== 扫描回调 ====================
@@ -121,7 +227,7 @@ pub fn attach(
     let ctx_exec = ctx.clone();
     ui.on_execute_requested(move || {
         let ui = weak.unwrap();
-        if ctx_exec.busy.load(Ordering::Relaxed) {
+        if ctx_exec.busy.load(Ordering::Relaxed) || ui.get_settings_saving() || ui.get_launcher_selecting() {
             return;
         }
         // 按钮可用性已由 plan-ready 门控；此处兜底校验。
@@ -204,7 +310,11 @@ pub fn attach(
     let ctx_settings = ctx.clone();
     ui.on_open_settings(move || {
         let ui = weak.unwrap();
+        if ui.get_settings_saving() || ui.get_launcher_selecting() { return; }
         let config = ctx_settings.config.lock().unwrap();
+        ui.set_settings_follow_launchers(config.follow_launchers);
+        ui.set_settings_launcher_paths(slint::ModelRc::new(slint::VecModel::from(config.launcher_paths.iter().map(|p| slint::SharedString::from(p.as_str())).collect::<Vec<_>>())));
+        ui.set_saved_launcher_paths_dirty(false);
         ui.set_settings_versions_dir(config.versions_dir.clone().into());
         ui.set_settings_auto_backup(config.auto_backup);
         ui.set_settings_include_saves(config.include_saves);
@@ -228,7 +338,8 @@ pub fn attach(
 
     let weak = ui.as_weak();
     ui.on_cancel_settings(move || {
-        weak.unwrap().set_settings_open(false);
+        let ui = weak.unwrap();
+        if !ui.get_settings_saving() && !ui.get_launcher_selecting() { ui.set_settings_open(false); }
     });
 
     let weak = ui.as_weak();
@@ -352,48 +463,95 @@ pub fn attach(
     let ctx_save = ctx.clone();
     ui.on_save_settings(move || {
         let ui = weak.unwrap();
+        if ui.get_settings_saving() || ui.get_launcher_selecting() { return; }
+        if ctx_save.executing.load(Ordering::Relaxed) {
+            set_status(&ui, "info", "迁移执行中，请等待完成后保存设置。");
+            return;
+        }
         let dir = ui.get_settings_versions_dir().trim().to_string();
-        // 目录有效性：空路径或不存在都拒绝保存，留在设置页等待修正。
-        if dir.is_empty() || !std::path::Path::new(&dir).is_dir() {
+        // 未配置 Minecraft 目录也可保存应用设置；非空路径必须是有效目录。
+        if !dir.is_empty() && !std::path::Path::new(&dir).is_dir() {
             set_status(&ui, "error", "目录不存在或不可访问，请检查路径后重试。");
             return;
         }
-        let (dir_changed, changes_changed) = {
-            let mut config = ctx_save.config.lock().unwrap();
-            let dir_changed = config.versions_dir != dir;
-            let toggles_changed = config.auto_backup != ui.get_settings_auto_backup()
-                || config.include_saves != ui.get_settings_include_saves()
-                || config.include_packs != ui.get_settings_include_packs()
-                || config.include_moddata != ui.get_settings_include_moddata()
-                || config.include_options != ui.get_settings_include_options();
-            // 规则草稿写回配置：与当前生效条目比较判断是否需要重出计划。
-            let working = ctx_save.working_rules.lock().unwrap().clone();
-            let rules_changed = config.rule_entries() != working;
-            config.versions_dir = dir.clone();
-            config.auto_backup = ui.get_settings_auto_backup();
-            config.include_saves = ui.get_settings_include_saves();
-            config.include_packs = ui.get_settings_include_packs();
-            config.include_moddata = ui.get_settings_include_moddata();
-            config.include_options = ui.get_settings_include_options();
-            config.rules = Some(working);
-            config.save();
-            (dir_changed, toggles_changed || rules_changed)
-        };
-        ui.set_settings_open(false);
-        if dir_changed {
-            // 目录变更：更新扫描根、重启目录监控并自动重扫（旧计划随之失效）。
-            *ctx_save.root_dir.lock().unwrap() = PathBuf::from(&dir);
-            (ctx_save.watcher_hook)(&dir);
-            ui.set_has_versions_dir(true);
-            set_status(&ui, "info", "设置已保存，正在重新扫描实例…");
-            try_start_scan(&ctx_save, &ui);
-        } else if changes_changed {
-            // 开关或规则变化：保留当前选择，直接重出计划（计划前按新配置刷新规则表）。
-            set_status(&ui, "info", "设置已保存，正在按新选项重新生成计划…");
-            try_start_plan(&ctx_save, &ui);
-        } else {
-            set_status(&ui, "success", "设置已保存。");
+        let previous = ctx_save.config.lock().unwrap().clone();
+        let mut next = previous.clone();
+        next.versions_dir = dir;
+        next.auto_backup = ui.get_settings_auto_backup();
+        next.include_saves = ui.get_settings_include_saves();
+        next.include_packs = ui.get_settings_include_packs();
+        next.include_moddata = ui.get_settings_include_moddata();
+        next.include_options = ui.get_settings_include_options();
+        next.follow_launchers = ui.get_settings_follow_launchers();
+        next.launcher_paths = ui.get_settings_launcher_paths().iter().map(|p| p.to_string()).collect();
+        if next.follow_launchers && next.launcher_paths.is_empty() {
+            set_status(&ui, "error", "请先选择要关联的 PCL2 / HMCL 启动器。 ");
+            return;
         }
+        next.rules = Some(ctx_save.working_rules.lock().unwrap().clone());
+        ui.set_settings_saving(true);
+        set_status(&ui, "info", "正在保存设置…");
+        let ctx_bg = ctx_save.clone();
+        let weak_bg = weak.clone();
+        std::thread::spawn(move || {
+            // shim 启动时读取磁盘配置；先落盘，再安装或恢复原入口。
+            // 关联变更失败时补偿配置，成功前不发布生效值，保留草稿供重试。
+            let result = if !next.save() {
+                Err("配置文件写入失败，请检查配置目录权限。".to_string())
+            } else if previous.follow_launchers != next.follow_launchers || previous.launcher_paths != next.launcher_paths {
+                match (ctx_bg.launcher_hook)(next.follow_launchers, &next.launcher_paths) {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        if previous.save() { Err(error) }
+                        else { Err(format!("{error}；旧配置恢复失败，请检查配置目录权限。")) }
+                    }
+                }
+            } else { Ok(()) };
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak_bg.upgrade() else { return; };
+                ui.set_settings_saving(false);
+                if let Err(error) = result {
+                    set_status(&ui, "error", &format!("设置保存失败：{error}"));
+                    return;
+                }
+                let dir_changed = previous.versions_dir != next.versions_dir;
+                let changes_changed = previous.auto_backup != next.auto_backup
+                    || previous.include_saves != next.include_saves
+                    || previous.include_packs != next.include_packs
+                    || previous.include_moddata != next.include_moddata
+                    || previous.include_options != next.include_options
+                    || previous.rule_entries() != next.rule_entries();
+                {
+                    let mut config = ctx_bg.config.lock().unwrap();
+                    // 已在途的计划可能刚更新选择；设置提交不能将其回退到提交前快照。
+                    next.last_source = config.last_source.clone();
+                    next.last_target = config.last_target.clone();
+                    *config = next.clone();
+                }
+                ui.set_launcher_follow_enabled(next.follow_launchers);
+                if previous.follow_launchers != next.follow_launchers || previous.launcher_paths != next.launcher_paths {
+                    ui.set_launcher_follow_revision(ui.get_launcher_follow_revision().wrapping_add(1));
+                }
+                ui.set_settings_open(false);
+                set_status(&ui, "success", "设置已保存。");
+                if dir_changed {
+                    *ctx_bg.root_dir.lock().unwrap() = PathBuf::from(&next.versions_dir);
+                    (ctx_bg.watcher_hook)(&next.versions_dir);
+                    ui.set_has_versions_dir(!next.versions_dir.is_empty());
+                    ui.set_plan_ready(false);
+                    *ctx_bg.plan.lock().unwrap() = None;
+                    *ctx_bg.service.lock().unwrap() = None;
+                    ctx_bg.profiles.lock().unwrap().clear();
+                    ui.set_instance_names(slint::ModelRc::default());
+                    ui.set_source_index(0);
+                    ui.set_target_index(0);
+                    clear_plan(&ui);
+                    if !next.versions_dir.is_empty() { try_start_scan(&ctx_bg, &ui); }
+                } else if changes_changed || ctx_bg.replan_pending.swap(false, Ordering::Relaxed) {
+                    try_start_plan(&ctx_bg, &ui);
+                }
+            });
+        });
     });
 
     // 启动即自动扫描：配置过目录时打开应用就有实例可选。
@@ -413,6 +571,7 @@ pub fn attach(
  * 实现思路：busy 互斥 → 目录校验 → 后台线程扫描 → 事件循环回填模型并恢复上次选择。
  */
 fn try_start_scan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
+    if ui.get_settings_saving() { return false; }
     if ctx.busy.load(Ordering::Relaxed) {
         return false;
     }
@@ -429,12 +588,18 @@ fn try_start_scan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
     std::thread::spawn(move || {
         // 每次扫描重建编排器：绑定最新 versions 根目录与当前配置的规则表。
         let rules = ctx_bg.ctx.config.lock().unwrap().effective_registry();
-        let service = Arc::new(Mutex::new(MigrationService::with_rules(root, rules)));
+        let service = Arc::new(Mutex::new(MigrationService::with_rules(root.clone(), rules)));
         let scan_result = service.lock().unwrap().instances.scan_instances();
         let _ = slint::invoke_from_event_loop(move || {
             ctx_bg.ctx.busy.store(false, Ordering::Relaxed);
             let Some(ui) = ctx_bg.weak.upgrade() else { return };
             ui.set_busy(false);
+            // 设置保存可能在扫描期间切换目录；旧结果不能覆盖新目录的空模型。
+            // 原扫描释放 busy 后在此补扫，避免保存时请求因忙碌被丢弃。
+            if *ctx_bg.ctx.root_dir.lock().unwrap() != root {
+                if ui.get_has_versions_dir() { try_start_scan(&ctx_bg.ctx, &ui); }
+                return;
+            }
             match scan_result {
                 Ok(found) => {
                     let count = found.len();
@@ -499,6 +664,10 @@ fn try_start_scan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
  *           后台线程生成计划 → 事件循环渲染并持久化最近选择。
  */
 fn try_start_plan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
+    if ui.get_settings_saving() {
+        ctx.replan_pending.store(true, Ordering::Relaxed);
+        return false;
+    }
     if ctx.busy.load(Ordering::Relaxed) {
         // 迁移执行期间不补跑计划；其余忙碌场景收尾后自动按最新选择重试。
         if !ctx.executing.load(Ordering::Relaxed) {
@@ -529,6 +698,7 @@ fn try_start_plan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
         return false;
     }
     let options = ctx.config.lock().unwrap().migration_options();
+    let planned_root = ctx.root_dir.lock().unwrap().clone();
 
     ctx.busy.store(true, Ordering::Relaxed);
     ctx.replan_pending.store(false, Ordering::Relaxed);
@@ -554,6 +724,11 @@ fn try_start_plan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
             ctx_bg.ctx.busy.store(false, Ordering::Relaxed);
             let Some(ui) = ctx_bg.weak.upgrade() else { return };
             ui.set_busy(false);
+            // 目录变更优先于旧计划回填；忙碌期间延迟的重扫从此处继续。
+            if *ctx_bg.ctx.root_dir.lock().unwrap() != planned_root {
+                if ui.get_has_versions_dir() { try_start_scan(&ctx_bg.ctx, &ui); }
+                return;
+            }
             match plan_result {
                 Ok(p) => {
                     apply_plan(&ui, &p);
@@ -562,7 +737,8 @@ fn try_start_plan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
                     let mut config = ctx_bg.ctx.config.lock().unwrap();
                     config.last_source = p.source.version.dir_name.clone();
                     config.last_target = p.target.version.dir_name.clone();
-                    config.save();
+                    // 保存设置期间磁盘包含待提交快照，最近选择不得覆盖它。
+                    if !ui.get_settings_saving() { config.save(); }
                 }
                 Err(PackError::InstanceLocked { instance_name, pid, process_name }) => {
                     ui.set_lock_warning_visible(true);
@@ -848,4 +1024,12 @@ fn rule_level_model(working: &[UserRuleEntry], level: AssetLevel) -> slint::Mode
         })
         .collect();
     slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
+}
+
+/// 更新启动器草稿与保存提示；磁盘入口只有保存设置时才允许变更。
+fn set_launcher_paths(ui: &PackPorterWindow, ctx: &ControllerCtx, paths: Vec<String>) {
+    ui.set_saved_launcher_paths_dirty(paths != ctx.config.lock().unwrap().launcher_paths);
+    ui.set_settings_launcher_paths(slint::ModelRc::new(slint::VecModel::from(
+        paths.into_iter().map(slint::SharedString::from).collect::<Vec<_>>()
+    )));
 }

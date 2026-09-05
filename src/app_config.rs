@@ -57,6 +57,10 @@ pub struct AppConfig {
     pub last_target: String,
     /// 是否在迁移前自动创建 Zip 备份（默认开启）。
     pub auto_backup: bool,
+    /// 是否跟随 shim 启动的 PCL2 / HMCL 会话；旧配置缺省关闭。
+    pub follow_launchers: bool,
+    /// 用户选择的原启动器 EXE 路径；关闭联动后保留选择，文件恢复由安装器负责。
+    pub launcher_paths: Vec<String>,
     /// 是否迁移存档（L1 可关断项，默认开启）。
     pub include_saves: bool,
     /// 是否迁移资源/光影包（L2 可关断项，默认开启）。
@@ -85,6 +89,8 @@ impl Default for AppConfig {
             last_source: String::new(),
             last_target: String::new(),
             auto_backup: true,
+            follow_launchers: false,
+            launcher_paths: Vec::new(),
             include_saves: true,
             include_packs: true,
             include_moddata: true,

@@ -3,7 +3,7 @@
 //! 时序说明：扫描与计划生成均为后台任务，测试以单一定时器状态机轮询推进，
 //!           全部等待都有超时上限，超时即判失败。
 
-use packporter::app_controller::attach;
+use packporter::app_controller::attach_with_launcher_hooks;
 use packporter::app_config::AppConfig;
 use packporter::{PackPorterWindow, RuleEditorApi};
 use slint::{ComponentHandle, Model};
@@ -50,13 +50,32 @@ fn run_all_inner() {
     // 无边框镶边几何：标题栏高度是静态常量，可在此锁定（Rust 命中测试依赖它划分拖动区）；
     // 控制区起点 x 依赖真实窗口布局（未显示时窗口宽为 0），交由静态契约检查与实机冒烟覆盖。
     assert_eq!(ui.get_titlebar_height(), 52.0, "标题栏高度应与自绘顶栏一致");
-    let handles = attach(&ui, versions_root.clone(), Arc::new(|_: &str| {}));
+    let launcher_calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let launcher_fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let calls = launcher_calls.clone();
+    let fail = launcher_fail.clone();
+    let launcher_selection_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let launcher_selection_outcome = Arc::new(std::sync::Mutex::new(Ok(Some(PathBuf::from("PCL2.exe")))));
+    let create_calls = launcher_selection_calls.clone();
+    let create_outcome = launcher_selection_outcome.clone();
+    let handles = attach_with_launcher_hooks(&ui, versions_root.clone(), Arc::new(|_: &str| {}), Arc::new(move |enabled, paths| {
+        calls.lock().unwrap().push((enabled, paths.to_vec()));
+        if fail.load(std::sync::atomic::Ordering::Relaxed) { return Err("模拟启动器恢复失败".into()); }
+        Ok(())
+    }), Arc::new(move || {
+        create_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        create_outcome.lock().unwrap().clone()
+    }));
 
     // 设置页开合：open 置位、cancel 复位（顶栏齿轮的开合开关依赖这对回调语义）。
     ui.invoke_open_settings();
     assert!(ui.get_settings_open(), "open-settings 应打开设置页");
+    assert!(!ui.get_settings_follow_launchers(), "跟随启动器默认关闭");
+    ui.set_settings_follow_launchers(true);
     ui.invoke_cancel_settings();
     assert!(!ui.get_settings_open(), "cancel-settings 应关闭设置页");
+    assert!(!AppConfig::load().follow_launchers, "取消不得落盘启动器草稿");
+    assert!(launcher_calls.lock().unwrap().is_empty(), "取消不得修改启动器关联");
 
     // 设置页规则配置弹窗：默认规则装载、新增/编辑/删除与非法输入拒绝。
     ui.invoke_open_settings();
@@ -100,6 +119,7 @@ fn run_all_inner() {
     // 配置中 versions 目录为空，保存前需填入合法目录（fixture 根）。
     ui.set_settings_versions_dir(versions_root.to_string_lossy().to_string().into());
     ui.invoke_save_settings();
+    wait_for_settings(&ui);
     assert!(!ui.get_settings_open(), "保存后设置页应关闭");
     let saved_rules = AppConfig::load().rules.expect("保存后配置应包含规则表");
     assert!(
@@ -238,7 +258,136 @@ fn run_all_inner() {
         "事件循环结束后状态栏应为迁移成功，实际：{}",
         ui.get_status_text()
     );
+    ui.invoke_open_settings();
+    ui.set_settings_versions_dir("".into());
+    ui.set_settings_follow_launchers(true);
+    ui.invoke_save_settings();
+    assert!(!ui.get_settings_saving(), "开启时必须先选择启动器");
+    assert!(ui.get_status_text().contains("选择"));
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    assert_eq!(ui.get_settings_launcher_paths().row_count(), 1);
+    assert!(AppConfig::load().launcher_paths.is_empty(), "选择仅修改草稿");
+    ui.invoke_save_settings();
+    assert!(ui.get_settings_saving(), "保存立即进入异步状态");
+    ui.invoke_save_settings();
+    ui.invoke_cancel_settings();
+    ui.invoke_open_settings();
+    assert!(ui.get_settings_open() && ui.get_settings_follow_launchers(), "保存期间禁止重复提交和覆盖草稿");
+    wait_for_settings(&ui);
+    assert!(!ui.get_settings_open());
+    assert!(AppConfig::load().follow_launchers && ui.get_launcher_follow_enabled());
+    assert!(!ui.get_has_versions_dir() && !ui.get_plan_ready());
+    assert_eq!(ui.get_instance_names().row_count(), 0, "清空目录后不得保留旧实例供迁移");
+    assert_eq!(ui.get_launcher_follow_revision(), 1);
+    assert_eq!(*launcher_calls.lock().unwrap(), vec![(true, vec!["PCL2.exe".to_string()])]);
+
+    launcher_fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    ui.invoke_open_settings();
+    ui.set_settings_follow_launchers(false);
+    ui.invoke_save_settings();
+    wait_for_settings(&ui);
+    assert!(ui.get_settings_open(), "失败保留设置页和草稿");
+    assert!(!ui.get_settings_follow_launchers());
+    assert!(AppConfig::load().follow_launchers && ui.get_launcher_follow_enabled(), "失败恢复持久化配置且不更新生效状态");
+    assert!(ui.get_status_text().contains("模拟启动器恢复失败"));
+    assert_eq!(ui.get_launcher_follow_revision(), 1, "失败不发布配置修订");
+    launcher_fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    ui.invoke_save_settings();
+    wait_for_settings(&ui);
+    assert!(!AppConfig::load().follow_launchers && !ui.get_launcher_follow_enabled());
+    assert_eq!(ui.get_launcher_follow_revision(), 2);
+    assert_eq!(*launcher_calls.lock().unwrap(), vec![(true, vec!["PCL2.exe".to_string()]), (false, vec!["PCL2.exe".to_string()]), (false, vec!["PCL2.exe".to_string()])]);
+
+    ui.invoke_open_settings();
+    ui.set_settings_follow_launchers(true);
+    ui.set_settings_versions_dir(config_dir.join("missing-versions").to_string_lossy().into_owned().into());
+    ui.invoke_save_settings();
+    assert!(!ui.get_settings_saving(), "非空无效目录必须拒绝保存");
+    assert_eq!(launcher_calls.lock().unwrap().len(), 3);
+    ui.set_settings_versions_dir("".into());
+    // 将配置目录指向普通文件，稳定模拟不可写目录且不依赖机器 ACL。
+    let blocked_dir = config_dir.join("blocked-directory");
+    std::fs::write(&blocked_dir, "blocked").unwrap();
+    std::env::set_var("PACKPORTER_CONFIG_DIR", &blocked_dir);
+    ui.invoke_save_settings();
+    wait_for_settings(&ui);
+    std::env::set_var("PACKPORTER_CONFIG_DIR", &config_dir);
+    assert!(ui.get_settings_open() && ui.get_settings_follow_launchers());
+    assert!(!ui.get_launcher_follow_enabled() && !AppConfig::load().follow_launchers);
+    assert!(ui.get_status_text().contains("配置文件写入失败"));
+    assert_eq!(launcher_calls.lock().unwrap().len(), 3, "写盘失败不得修改启动器关联");
+    ui.set_settings_saving(true);
+    ui.invoke_select_launcher();
+    assert!(!ui.get_launcher_selecting(), "保存期间不得打开启动器选择对话框");
+    ui.set_settings_saving(false);
+    ui.set_executing(true);
+    ui.invoke_select_launcher();
+    assert!(!ui.get_launcher_selecting(), "迁移期间不得选择启动器");
+    ui.set_executing(false);
+    ui.invoke_select_launcher();
+    assert!(ui.get_launcher_selecting());
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    assert_eq!(launcher_selection_calls.load(std::sync::atomic::Ordering::Relaxed), 2, "选择期间禁止重复触发");
+    assert!(ui.get_status_text().contains("PCL2.exe"));
+    assert!(ui.get_status_text().contains("保存"), "草稿开启不等于配置已生效");
+    assert!(!AppConfig::load().follow_launchers, "选择启动器不得改动联动配置");
+    *launcher_selection_outcome.lock().unwrap() = Ok(None);
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    assert!(ui.get_status_text().contains("已取消"));
+    *launcher_selection_outcome.lock().unwrap() = Err("模拟启动器选择失败".into());
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    assert!(ui.get_status_text().contains("模拟启动器选择失败"));
+    assert_eq!(ui.get_settings_launcher_paths().row_count(), 1, "重复选择、取消和失败不得重复添加路径");
+    *launcher_selection_outcome.lock().unwrap() = Ok(Some(PathBuf::from("HMCL.exe")));
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    assert_eq!(ui.get_settings_launcher_paths().row_count(), 2, "支持多个启动器");
+    assert!(ui.get_saved_launcher_paths_dirty());
+    ui.invoke_remove_launcher(0);
+    assert_eq!(ui.get_settings_launcher_paths().row_data(0).unwrap(), "HMCL.exe");
+    ui.invoke_cancel_settings();
+    ui.invoke_open_settings();
+    assert_eq!(ui.get_settings_launcher_paths().row_data(0).unwrap(), "PCL2.exe", "取消放弃路径增删草稿");
+    assert!(!ui.get_saved_launcher_paths_dirty());
+    assert_eq!(launcher_calls.lock().unwrap().len(), 3, "草稿选择和移除不触发安装或还原");
+    ui.invoke_select_launcher();
+    wait_for_launcher_selection(&ui);
+    ui.invoke_save_settings();
+    wait_for_settings(&ui);
+    assert_eq!(AppConfig::load().launcher_paths, vec!["PCL2.exe", "HMCL.exe"]);
+    assert_eq!(launcher_calls.lock().unwrap().last().unwrap(), &(false, vec!["PCL2.exe".into(), "HMCL.exe".into()]), "关闭时保存路径也调用同步钩子");
+
     let _ = slint::quit_event_loop();
+}
+
+// 在真实事件循环等待原生选择适配器收尾，避免只验证后台派发而遗漏 UI 结果。
+fn wait_for_launcher_selection(ui: &PackPorterWindow) {
+    let weak = ui.as_weak();
+    let ticks = std::cell::Cell::new(0);
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(10), move || {
+        ticks.set(ticks.get() + 1);
+        assert!(ticks.get() < 500, "启动器选择超时");
+        if !weak.unwrap().get_launcher_selecting() { let _ = slint::quit_event_loop(); }
+    });
+    slint::run_event_loop_until_quit().unwrap();
+}
+
+// 在真实事件循环等待保存收尾；超时使回调测试失败，避免后台失败被误判成功。
+fn wait_for_settings(ui: &PackPorterWindow) {
+    let weak = ui.as_weak();
+    let ticks = std::cell::Cell::new(0);
+    let timer = slint::Timer::default();
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(10), move || {
+        ticks.set(ticks.get() + 1);
+        assert!(ticks.get() < 500, "设置保存超时");
+        if !weak.unwrap().get_settings_saving() { let _ = slint::quit_event_loop(); }
+    });
+    slint::run_event_loop_until_quit().unwrap();
 }
 
 use std::sync::Arc;

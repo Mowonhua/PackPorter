@@ -7,6 +7,8 @@ pub mod json_profile;
 pub mod key_value;
 /// 运行中 java 进程枚举与实例目录关联判定。
 pub mod process_probe;
+/// 启动器伴随模式：会话计数、旧登录项清理与应用单实例保护。
+pub mod launcher_companion;
 /// Zip 镜像备份的打包与还原实现。
 pub mod zip_archive;
 /// Windows 无边框窗口镶边：命中测试子类化与 DWM 打磨（仅 Windows 编译）。
@@ -14,3 +16,9 @@ pub mod zip_archive;
 pub mod window_chrome;
 /// versions/ 目录监控与稳定性判定的默认实现。
 pub mod watcher;
+
+/// 独立包装入口及命名启动器会话。
+pub mod launcher_shim;
+
+/// 原路径启动器入口的可逆安装及恢复。
+pub mod launcher_binding;

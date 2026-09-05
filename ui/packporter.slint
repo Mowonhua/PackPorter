@@ -6,7 +6,7 @@
  *           反馈走单行状态栏（status-text，逐次覆盖），不再保留追加式日志。
  */
 
-import { Button, ComboBox, ListView, LineEdit, ProgressIndicator, Spinner, Switch } from "std-widgets.slint";
+import { Button, ComboBox, ListView, LineEdit, ProgressIndicator, Spinner, Switch, ScrollView, Palette } from "std-widgets.slint";
 import { AnimatedLayer } from "motion.slint";
 
 // 计划预览列表的单行数据，由 Rust 侧从迁移计划构建。
@@ -462,6 +462,8 @@ component RuleDialog inherits Rectangle {
 // 主窗口：单页主流程（选择实例 → 自动出计划 → 执行 → 结果）+ 设置页切换。
 // 无边框窗口：系统标题栏/边框由自绘顶栏与 Rust 命中测试子类替代（拖动/缩放/双击最大化）。
 export component PackPorterWindow inherits Window {
+    // 自绘窗口与卡片使用固定浅色背景，标准控件必须采用同一色系，避免系统暗色下白底白字。
+    init => { Palette.color-scheme = ColorScheme.light; }
     title: "PackPorter";
     icon: @image-url("../assets/icons/packporter.png");
     no-frame: true;
@@ -509,6 +511,18 @@ export component PackPorterWindow inherits Window {
 
     // ---- 设置页 ----
     in-out property <bool> settings-open: false;
+    // 异步保存期间禁用编辑和页面切换，成功前保持旧生效值。
+    in-out property <bool> settings-saving: false;
+    // 选择路径期间禁止重复触发，退出跟随逻辑须等待本操作结束。
+    in-out property <bool> launcher-selecting: false;
+    callback select-launcher();
+    callback remove-launcher(int);
+    in-out property <[string]> settings-launcher-paths: [];
+    in-out property <bool> saved-launcher-paths-dirty: false;
+    in-out property <bool> settings-follow-launchers: false;
+    in-out property <bool> launcher-follow-enabled: false;
+    // 每次成功变更递增，供生命周期观察者识别短时间内完成的禁用与重启。
+    in-out property <int> launcher-follow-revision: 0;
     // 父页面关闭即清除弹窗目标状态，避免下次进入设置时恢复旧弹窗。
     changed settings-open => {
         if (!root.settings-open) { root.rule-dialog-visible = false; }
@@ -538,6 +552,8 @@ export component PackPorterWindow inherits Window {
     // 是否存在未保存的设置改动：驱动保存按钮高亮提醒。
     pure function settings-dirty() -> bool {
         return saved-versions-dir != settings-versions-dir
+            || launcher-follow-enabled != settings-follow-launchers
+            || saved-launcher-paths-dirty
             || saved-auto-backup != settings-auto-backup
             || saved-include-saves != settings-include-saves
             || saved-include-packs != settings-include-packs
@@ -615,7 +631,7 @@ export component PackPorterWindow inherits Window {
                     vertical-alignment: center;
                 }
                 titlebar-gear := GearButton {
-                    enabled: !root.busy;
+                    enabled: !root.busy && !root.settings-saving;
                     // 开合开关：设置页已打开时再点即关闭（走取消路径，不落任何改动）。
                     clicked => {
                         if (root.settings-open) {
@@ -663,7 +679,7 @@ export component PackPorterWindow inherits Window {
                 width: parent.width - 32px;
                 height: parent.height - 32px;
                 shown: !root.settings-open;
-                interactive: !dialog-layer.present;
+                interactive: !dialog-layer.present && !root.settings-saving && !root.launcher-selecting;
                 offset-x: -12px;
                 if main-layer.present: VerticalLayout {
                     spacing: 10px;
@@ -772,12 +788,12 @@ export component PackPorterWindow inherits Window {
                         Button {
                             text: "开始迁移";
                             primary: true;
-                            enabled: root.plan-ready && !root.busy && !root.executing;
+                            enabled: root.plan-ready && !root.busy && !root.executing && !root.launcher-selecting;
                             clicked => { root.execute-requested(); }
                         }
                         Button {
                             text: "打开备份目录";
-                            enabled: root.plan-ready && !root.busy && !root.executing;
+                            enabled: root.plan-ready && !root.busy && !root.executing && !root.launcher-selecting;
                             clicked => { root.open-backup-folder(); }
                         }
                         Rectangle { horizontal-stretch: 1; }
@@ -792,63 +808,100 @@ export component PackPorterWindow inherits Window {
                 width: parent.width - 32px;
                 height: parent.height - 32px;
                 shown: root.settings-open;
-                interactive: !dialog-layer.present;
+                interactive: !dialog-layer.present && !root.settings-saving && !root.launcher-selecting;
                 offset-x: 12px;
                 if settings-layer.present: VerticalLayout {
                     spacing: 10px;
 
-                    Card {
-                        title: "Minecraft 目录";
-                        HorizontalLayout {
-                            spacing: 8px;
-                            LineEdit {
-                                text <=> root.settings-versions-dir;
-                                placeholder-text: "例如 D:\\Minecraft\\.minecraft\\versions";
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "浏览…";
-                                clicked => { root.browse-versions-dir(); }
-                            }
-                        }
-                    }
-
-                    Card {
-                        title: "迁移内容";
+                    ScrollView {
+                        vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 12px;
-                            SettingRow {
-                                label: "迁移前自动备份";
-                                checked <=> root.settings-auto-backup;
+                            spacing: 10px;
+                            Card {
+                                title: "Minecraft 目录";
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        text <=> root.settings-versions-dir;
+                                        placeholder-text: "例如 D:\\Minecraft\\.minecraft\\versions";
+                                        horizontal-stretch: 1;
+                                    }
+                                    Button {
+                                        text: "浏览…";
+                                        clicked => { root.browse-versions-dir(); }
+                                    }
+                                }
                             }
-                            SettingRow {
-                                label: "存档与个人资产（L1）";
-                                checked <=> root.settings-include-saves;
-                                has-config: true;
-                                configure => { root.open-rule-dialog(1); }
+
+                            Card {
+                                title: "迁移内容";
+                                VerticalLayout {
+                                    spacing: 12px;
+                                    SettingRow {
+                                        label: "迁移前自动备份";
+                                        checked <=> root.settings-auto-backup;
+                                    }
+                                    SettingRow {
+                                        label: "存档与个人资产（L1）";
+                                        checked <=> root.settings-include-saves;
+                                        has-config: true;
+                                        configure => { root.open-rule-dialog(1); }
+                                    }
+                                    SettingRow {
+                                        label: "资源包与光影包（L2）";
+                                        checked <=> root.settings-include-packs;
+                                        has-config: true;
+                                        configure => { root.open-rule-dialog(2); }
+                                    }
+                                    SettingRow {
+                                        label: "模组数据（L3）";
+                                        checked <=> root.settings-include-moddata;
+                                        has-config: true;
+                                        configure => { root.open-rule-dialog(3); }
+                                    }
+                                    SettingRow {
+                                        label: "客户端偏好（L4）";
+                                        checked <=> root.settings-include-options;
+                                        has-config: true;
+                                        configure => { root.open-rule-dialog(4); }
+                                    }
+                                }
                             }
-                            SettingRow {
-                                label: "资源包与光影包（L2）";
-                                checked <=> root.settings-include-packs;
-                                has-config: true;
-                                configure => { root.open-rule-dialog(2); }
+
+                            Card {
+                                title: "启动器联动";
+                                SettingRow {
+                                    label: "跟随 PCL2 / HMCL 启动与退出";
+                                    checked <=> root.settings-follow-launchers;
+                                }
+                                Text {
+                                    text: "原启动器备份为 xxx.bak.exe；保存开启后，原 EXE 和旧快捷方式均可联动。最后一个关联启动器退出后自动关闭。关闭并保存时自动还原原启动器。";
+                                    color: #6b7280;
+                                    wrap: word-wrap;
+                                    font-size: 12px;
+                                }
+                                for path[index] in root.settings-launcher-paths: HorizontalLayout {
+                                    Text {
+                                        text: path;
+                                        color: #374151;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Button {
+                                        text: "移除";
+                                        enabled: !root.settings-saving && !root.executing && !root.launcher-selecting;
+                                        clicked => { root.remove-launcher(index); }
+                                    }
+                                }
+                                Button {
+                                    text: root.launcher-selecting ? "选择中…" : "关联启动器…";
+                                    enabled: !root.settings-saving && !root.executing && !root.launcher-selecting;
+                                    clicked => { root.select-launcher(); }
+                                }
                             }
-                            SettingRow {
-                                label: "模组数据（L3）";
-                                checked <=> root.settings-include-moddata;
-                                has-config: true;
-                                configure => { root.open-rule-dialog(3); }
-                            }
-                            SettingRow {
-                                label: "客户端偏好（L4）";
-                                checked <=> root.settings-include-options;
-                                has-config: true;
-                                configure => { root.open-rule-dialog(4); }
-                            }
+
                         }
                     }
-
-                    Rectangle { vertical-stretch: 1; }
 
                     HorizontalLayout {
                         spacing: 8px;
@@ -858,7 +911,7 @@ export component PackPorterWindow inherits Window {
                             clicked => { root.cancel-settings(); }
                         }
                         ActionButton {
-                            text: "保存";
+                            text: root.settings-saving ? "保存中…" : "保存";
                             // 默认深色；有未保存改动时切换为醒目蓝色提醒保存。
                             accent: root.settings-dirty();
                             clicked => { root.save-settings(); }
