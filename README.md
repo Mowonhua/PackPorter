@@ -30,7 +30,9 @@
 
 ## 开始使用
 
-当前可从源码构建运行。以下以 **Windows** 为例，需要 Rust/Cargo，以及对应工具链的链接器和 Windows 资源编译工具。
+从 [Releases](https://github.com/Mowonhua/PackPorter/releases) 下载 Windows x64 压缩包，解压后运行 `packporter.exe`。首版 `v0.1.0-alpha.1` 为预发布版本；下载页附有 SHA-256 校验文件。
+
+也可从源码构建运行。以下以 **Windows** 为例，需要 Rust/Cargo，以及对应工具链的链接器和 Windows 资源编译工具。
 
 在仓库根目录运行：
 
@@ -100,6 +102,10 @@ Windows 产物为 `target/release/packporter.exe`。应用图标已嵌入程序�
 - **兼容范围**：识别 Minecraft 与 Loader 版本不代表存档或模组数据可以跨版本兼容。工具负责资产迁移，不转换存档或 Mod 数据格式。
 
 ## 开发
+
+GitHub Actions 在推送到 `main`、提交 PR 或手动触发时运行测试并构建 Windows x64 发布包，可在 Actions 运行页的 Artifacts 中下载（保留 14 天）。CI 使用 Rust 1.93.0 和 `Cargo.lock` 中锁定的依赖。
+
+发布时同步更新 `Cargo.toml`、`Cargo.lock` 的版本，再推送对应的 `v<版本号>` tag。测试和构建通过后自动创建 GitHub Release 并上传压缩包与校验文件；带 `-alpha`、`-beta` 或 `-rc` 等后缀的版本标记为预发布。可在 `docs/releases/<tag>.md` 提供发布说明，缺省时由 GitHub 自动生成。
 
 **Rust + Slint**，按领域、服务、基础设施分层：领域层不做 IO，服务层编排迁移，基础设施层处理文件、进程与目录监控。
 
