@@ -3,13 +3,14 @@
 //! 反馈约定：用户提示统一走单行状态栏（覆盖式），不再使用追加式日志；
 //!           扫描与计划生成均在后台线程执行，UI 只在事件循环线程写属性。
 
-use crate::app_config::AppConfig;
+use crate::app_config::{AppConfig, UserRuleEntry};
 use crate::domain::error::{PackError, PackResult};
 use crate::domain::instance::{
     AssetLevel, DecisionAction, InstanceProfile, MigrationPlan, MigrationProgress,
 };
+use crate::domain::rules::{normalize_rule_path, rules_conflict};
 use crate::services::migration_service::MigrationService;
-use crate::{PlanEntryView, PackPorterWindow};
+use crate::{PlanEntryView, PackPorterWindow, RuleEditorApi, RuleRowView};
 use slint::ComponentHandle;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +22,8 @@ type ProfilesSlot = Arc<Mutex<Vec<InstanceProfile>>>;
 type ServiceSlot = Arc<Mutex<Option<Arc<Mutex<MigrationService>>>>>;
 // 最近一次生成的迁移计划，供执行与打开备份目录复用。
 type PlanSlot = Arc<Mutex<Option<MigrationPlan>>>;
+// 设置页编辑中的规则草稿（打开时从配置装载，保存时写回）。
+type WorkingRulesSlot = Arc<Mutex<Vec<UserRuleEntry>>>;
 
 // versions 目录变更时重启目录监控的钩子（由入口层注入，测试可传空实现）。
 pub type WatcherRestartHook = Arc<dyn Fn(&str) + Send + Sync>;
@@ -47,6 +50,8 @@ struct ControllerCtx {
     service: ServiceSlot,
     /// 最近一次生成的迁移计划。
     plan: PlanSlot,
+    /// 设置页编辑中的规则草稿（打开时装载、回调更新、保存时写回配置）。
+    working_rules: WorkingRulesSlot,
     /// versions 目录变更钩子。
     watcher_hook: WatcherRestartHook,
 }
@@ -96,6 +101,7 @@ pub fn attach(
         profiles: Arc::new(Mutex::new(Vec::new())),
         service: Arc::new(Mutex::new(None)),
         plan: Arc::new(Mutex::new(None)),
+        working_rules: Arc::new(Mutex::new(Vec::new())),
         watcher_hook,
     });
 
@@ -204,6 +210,18 @@ pub fn attach(
         ui.set_settings_include_packs(config.include_packs);
         ui.set_settings_include_moddata(config.include_moddata);
         ui.set_settings_include_options(config.include_options);
+        // 规则草稿从配置装载（未自定义时为内置默认）；弹窗按需加载，无需预同步。
+        let working = config.rule_entries();
+        // 保存高亮基线：快照已保存值，规则视为无改动。
+        ui.set_saved_versions_dir(config.versions_dir.clone().into());
+        ui.set_saved_auto_backup(config.auto_backup);
+        ui.set_saved_include_saves(config.include_saves);
+        ui.set_saved_include_packs(config.include_packs);
+        ui.set_saved_include_moddata(config.include_moddata);
+        ui.set_saved_include_options(config.include_options);
+        ui.set_saved_rules_dirty(false);
+        drop(config);
+        *ctx_settings.working_rules.lock().unwrap() = working;
         ui.set_settings_open(true);
     });
 
@@ -224,6 +242,111 @@ pub fn attach(
         }
     });
 
+    // 规则配置弹窗：按级别装载标题与路径行模型后置位可见。
+    let weak = ui.as_weak();
+    let ctx_rules = ctx.clone();
+    ui.on_open_rule_dialog(move |level| {
+        let ui = weak.unwrap();
+        let Some(level) = AssetLevel::from_index(level.max(0) as u32) else { return; };
+        // 级别属性以 1-4 序号流转（与 UI 回调一致），不能用枚举判别值（0 起始）。
+        ui.set_rule_dialog_level(level.index() as i32);
+        ui.set_rule_dialog_title(format!("配置迁移路径 · {}", level_label(level)).into());
+        let working = ctx_rules.working_rules.lock().unwrap();
+        let model = rule_level_model(&working, level);
+        drop(working);
+        ui.set_rule_dialog_rows(model);
+        ui.set_rule_dialog_visible(true);
+    });
+
+    // ==================== 规则编辑回调（设置页级别面板，经 RuleEditorApi 桥接） ====================
+    let weak = ui.as_weak();
+    let ctx_rules = ctx.clone();
+    ui.global::<RuleEditorApi>().on_add(move |level, path| -> bool {
+        let ui = weak.unwrap();
+        let Some(level) = AssetLevel::from_index(level.max(0) as u32) else { return false; };
+        let Some(normalized) = validate_rule_input(&ui, &path) else { return false; };
+        let mut working = ctx_rules.working_rules.lock().unwrap();
+        if let Some(existing) = working
+            .iter()
+            .find(|e| rules_conflict(&e.relative_path, &normalized))
+        {
+            set_status(
+                &ui,
+                "error",
+                &format!(
+                    "与{}的「{}」互相覆盖，请先删除或修改该规则。",
+                    level_label(existing.level),
+                    existing.relative_path
+                ),
+            );
+            return false;
+        }
+        working.push(UserRuleEntry { relative_path: normalized, level, enabled: true });
+        sync_rule_models(&ui, &working);
+        update_rules_dirty(&ui, &ctx_rules, &working);
+        true
+    });
+
+    let weak = ui.as_weak();
+    let ctx_rules = ctx.clone();
+    ui.global::<RuleEditorApi>().on_update(move |level, index, path| -> bool {
+        let ui = weak.unwrap();
+        let Some(level) = AssetLevel::from_index(level.max(0) as u32) else { return false; };
+        let Some(normalized) = validate_rule_input(&ui, &path) else { return false; };
+        let mut working = ctx_rules.working_rules.lock().unwrap();
+        let Some(flat) = level_entry_index(&working, level, index as usize) else { return false; };
+        // 冲突检查需跳过本条目（允许改回自身原路径）。
+        if let Some(existing) = working
+            .iter()
+            .enumerate()
+            .find(|(i, e)| *i != flat && rules_conflict(&e.relative_path, &normalized))
+            .map(|(_, e)| e)
+        {
+            set_status(
+                &ui,
+                "error",
+                &format!(
+                    "与{}的「{}」互相覆盖，请先删除或修改该规则。",
+                    level_label(existing.level),
+                    existing.relative_path
+                ),
+            );
+            return false;
+        }
+        working[flat].relative_path = normalized;
+        sync_rule_models(&ui, &working);
+        update_rules_dirty(&ui, &ctx_rules, &working);
+        true
+    });
+
+    let weak = ui.as_weak();
+    let ctx_rules = ctx.clone();
+    ui.global::<RuleEditorApi>().on_remove(move |level, index| {
+        let ui = weak.unwrap();
+        let Ok(level) = u32::try_from(level.max(0)) else { return; };
+        let Some(level) = AssetLevel::from_index(level) else { return; };
+        let mut working = ctx_rules.working_rules.lock().unwrap();
+        if let Some(flat) = level_entry_index(&working, level, index as usize) {
+            working.remove(flat);
+            sync_rule_models(&ui, &working);
+            update_rules_dirty(&ui, &ctx_rules, &working);
+        }
+    });
+
+    let weak = ui.as_weak();
+    let ctx_rules = ctx.clone();
+    ui.global::<RuleEditorApi>().on_set_enabled(move |level, index, enabled| {
+        let ui = weak.unwrap();
+        let Ok(level) = u32::try_from(level.max(0)) else { return; };
+        let Some(level) = AssetLevel::from_index(level) else { return; };
+        let mut working = ctx_rules.working_rules.lock().unwrap();
+        if let Some(flat) = level_entry_index(&working, level, index as usize) {
+            working[flat].enabled = enabled;
+            sync_rule_models(&ui, &working);
+            update_rules_dirty(&ui, &ctx_rules, &working);
+        }
+    });
+
     let weak = ui.as_weak();
     let ctx_save = ctx.clone();
     ui.on_save_settings(move || {
@@ -234,7 +357,7 @@ pub fn attach(
             set_status(&ui, "error", "目录不存在或不可访问，请检查路径后重试。");
             return;
         }
-        let (dir_changed, toggles_changed) = {
+        let (dir_changed, changes_changed) = {
             let mut config = ctx_save.config.lock().unwrap();
             let dir_changed = config.versions_dir != dir;
             let toggles_changed = config.auto_backup != ui.get_settings_auto_backup()
@@ -242,14 +365,18 @@ pub fn attach(
                 || config.include_packs != ui.get_settings_include_packs()
                 || config.include_moddata != ui.get_settings_include_moddata()
                 || config.include_options != ui.get_settings_include_options();
+            // 规则草稿写回配置：与当前生效条目比较判断是否需要重出计划。
+            let working = ctx_save.working_rules.lock().unwrap().clone();
+            let rules_changed = config.rule_entries() != working;
             config.versions_dir = dir.clone();
             config.auto_backup = ui.get_settings_auto_backup();
             config.include_saves = ui.get_settings_include_saves();
             config.include_packs = ui.get_settings_include_packs();
             config.include_moddata = ui.get_settings_include_moddata();
             config.include_options = ui.get_settings_include_options();
+            config.rules = Some(working);
             config.save();
-            (dir_changed, toggles_changed)
+            (dir_changed, toggles_changed || rules_changed)
         };
         ui.set_settings_open(false);
         if dir_changed {
@@ -259,8 +386,8 @@ pub fn attach(
             ui.set_has_versions_dir(true);
             set_status(&ui, "info", "设置已保存，正在重新扫描实例…");
             try_start_scan(&ctx_save, &ui);
-        } else if toggles_changed {
-            // 仅开关变化：保留当前选择，直接重出计划。
+        } else if changes_changed {
+            // 开关或规则变化：保留当前选择，直接重出计划（计划前按新配置刷新规则表）。
             set_status(&ui, "info", "设置已保存，正在按新选项重新生成计划…");
             try_start_plan(&ctx_save, &ui);
         } else {
@@ -299,8 +426,9 @@ fn try_start_scan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
 
     let ctx_bg = CtxShare::new(ctx, ui.as_weak());
     std::thread::spawn(move || {
-        // 每次扫描重建编排器，保证绑定最新的 versions 根目录。
-        let service = Arc::new(Mutex::new(MigrationService::new(root)));
+        // 每次扫描重建编排器：绑定最新 versions 根目录与当前配置的规则表。
+        let rules = ctx_bg.ctx.config.lock().unwrap().effective_registry();
+        let service = Arc::new(Mutex::new(MigrationService::with_rules(root, rules)));
         let scan_result = service.lock().unwrap().instances.scan_instances();
         let _ = slint::invoke_from_event_loop(move || {
             ctx_bg.ctx.busy.store(false, Ordering::Relaxed);
@@ -379,6 +507,11 @@ fn try_start_plan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
         // 未扫描时的自动触发是正常路径（索引复位等），静默忽略。
         return false;
     };
+    // 计划前按当前配置刷新规则表：设置页可能已修改迁移路径或启用开关。
+    {
+        let registry = ctx.config.lock().unwrap().effective_registry();
+        service_mutex.lock().unwrap().rules = registry;
+    }
     let profiles = ctx.profiles.lock().unwrap();
     let (s, t) = (ui.get_source_index(), ui.get_target_index());
     // 索引有效性：0 为占位行（未选择）；其余按 偏移 1 映射到画像列表。
@@ -609,4 +742,92 @@ fn clear_plan(ui: &PackPorterWindow) {
     ui.set_plan_summary("".into());
     ui.set_progress_text("".into());
     ui.set_progress_percent(-1);
+}
+
+// ==================== 规则编辑辅助（UI 线程调用） ====================
+
+/**
+ * 函数职责：校验并规范化规则路径输入。
+ * 输入说明：ui 为窗口引用（校验失败写状态栏）；raw 为用户原始输入。
+ * 输出说明：成功返回规范化路径；失败返回 None（已向状态栏写明原因）。
+ * 实现思路：委托领域层 normalize_rule_path，错误文案透传给状态栏。
+ */
+fn validate_rule_input(ui: &PackPorterWindow, raw: &str) -> Option<String> {
+    match normalize_rule_path(raw) {
+        Ok(normalized) => Some(normalized),
+        Err(reason) => {
+            set_status(ui, "error", &reason);
+            None
+        }
+    }
+}
+
+/**
+ * 函数职责：将"级别内索引"映射为规则草稿的扁平索引。
+ * 输入说明：working 为规则草稿；level 为资产级别；index 为该级别面板内的行号。
+ * 输出说明：命中返回扁平索引；越界返回 None。
+ * 实现思路：按级别过滤计数定位（UI 模型按级别分组展示，草稿按级别顺序扁平存储）。
+ */
+fn level_entry_index(
+    working: &[UserRuleEntry],
+    level: AssetLevel,
+    index: usize,
+) -> Option<usize> {
+    let mut seen = 0usize;
+    for (flat, entry) in working.iter().enumerate() {
+        if entry.level == level {
+            if seen == index {
+                return Some(flat);
+            }
+            seen += 1;
+        }
+    }
+    None
+}
+
+/**
+ * 函数职责：刷新"规则草稿有未保存改动"标记，驱动设置页保存按钮高亮。
+ * 输入说明：ui 为窗口引用；ctx 为共享上下文；working 为当前规则草稿
+ *           （调用方持有的锁内切片，本函数不得重复加锁，避免同线程死锁）。
+ * 输出说明：副作用为写 saved-rules-dirty（草稿与已保存配置逐条比较）。
+ * 实现思路：每次规则回调后调用；改动被完全撤销时标记自动清除。
+ */
+fn update_rules_dirty(ui: &PackPorterWindow, ctx: &ControllerCtx, working: &[UserRuleEntry]) {
+    let dirty = *working != ctx.config.lock().unwrap().rule_entries();
+    ui.set_saved_rules_dirty(dirty);
+}
+
+/**
+ * 函数职责：将规则草稿同步到打开中的规则配置弹窗行模型。
+ * 输入说明：ui 为窗口引用；working 为规则草稿。
+ * 输出说明：副作用为弹窗可见时重写 rule-dialog-rows（当前弹窗级别的行）；
+ *           弹窗未打开时为无操作。
+ * 实现思路：增删改回调统一走此入口，弹窗行随草稿实时刷新。
+ */
+fn sync_rule_models(ui: &PackPorterWindow, working: &[UserRuleEntry]) {
+    if !ui.get_rule_dialog_visible() {
+        return;
+    }
+    let Some(level) = AssetLevel::from_index(ui.get_rule_dialog_level().max(0) as u32) else {
+        return;
+    };
+    ui.set_rule_dialog_rows(rule_level_model(working, level));
+}
+
+/**
+ * 函数职责：构建指定级别的规则行模型（弹窗清单数据源）。
+ * 输入说明：working 为规则草稿；level 为资产级别。
+ * 输出说明：该级别全部规则（含禁用项）的行模型，保持草稿顺序。
+ * 实现思路：按级别过滤后映射为 RuleRowView。
+ */
+fn rule_level_model(working: &[UserRuleEntry], level: AssetLevel) -> slint::ModelRc<RuleRowView> {
+    let rows: Vec<RuleRowView> = working
+        .iter()
+        .filter(|entry| entry.level == level)
+        .map(|entry| RuleRowView {
+            path: entry.relative_path.clone().into(),
+            enabled: entry.enabled,
+        })
+        .collect();
+    slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
 }

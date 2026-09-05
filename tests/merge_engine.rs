@@ -332,8 +332,21 @@ fn plan_and_execute_end_to_end_migrates_assets() {
     assert!(saves_entry.decisions.iter().any(|d| d.relative_path == "saves/world/level.dat"));
     let packs_entry = plan.entries.iter().find(|e| e.rule.level == AssetLevel::Incremental).unwrap();
     assert!(packs_entry.decisions.iter().any(|d| d.action == packporter::domain::instance::DecisionAction::KeepNew));
-    assert!(plan.options_result.is_some());
-    assert_eq!(plan.options_result.as_ref().unwrap().merged.iter().find(|(k, _)| k == "fov").unwrap().1, "0.85");
+    let options_outcome = plan
+        .options_results
+        .iter()
+        .find(|o| o.relative_path == "options.txt")
+        .expect("默认 L4 规则应产出 options.txt 合并明细");
+    assert_eq!(
+        options_outcome
+            .result
+            .merged
+            .iter()
+            .find(|(k, _)| k == "fov")
+            .unwrap()
+            .1,
+        "0.85"
+    );
 
     let outcome = service.execute_plan(&plan, true, &mut |_| {}).unwrap();
     assert!(outcome.success);
@@ -386,7 +399,7 @@ fn execute_plan_rejects_unconfirmed() {
         },
         entries: Vec::new(),
         backup_dir: std::path::PathBuf::from("/tmp/backups"),
-        options_result: None,
+        options_results: Vec::new(),
         options: packporter::domain::instance::MigrationOptions::all_enabled(),
     };
     let _ = &a;
@@ -433,7 +446,7 @@ fn plan_options_exclude_disabled_levels_and_skip_backup() {
         !plan.entries.iter().any(|e| e.rule.relative_path == "resourcepacks/"),
         "关闭 L2 后计划不应包含资源包条目"
     );
-    assert!(plan.options_result.is_none(), "关闭 L4 后计划不应携带合并明细");
+    assert!(plan.options_results.is_empty(), "关闭 L4 后计划不应携带合并明细");
 
     // 执行：auto_backup=false 时即使存在覆盖也不生成备份 zip。
     let outcome = service.execute_plan(&plan, true, &mut |_| {}).unwrap();
@@ -470,17 +483,137 @@ fn plan_options_exclude_disabled_levels_and_skip_backup() {
 
 #[test]
 fn app_config_roundtrips_through_disk() {
-    use packporter::app_config::AppConfig;
-    let mut config = AppConfig::default();
-    config.versions_dir = "E:\\test\\versions".to_string();
-    config.include_saves = false;
+    use packporter::app_config::{default_rule_entries, AppConfig, UserRuleEntry};
+    use packporter::domain::instance::AssetLevel;
+    let config = AppConfig {
+        versions_dir: "E:\\test\\versions".to_string(),
+        include_saves: false,
+        rules: Some(vec![
+            UserRuleEntry { relative_path: "saves/".to_string(), level: AssetLevel::Direct, enabled: true },
+            UserRuleEntry {
+                relative_path: "custom/".to_string(),
+                level: AssetLevel::ModData,
+                enabled: false,
+            },
+        ]),
+        ..AppConfig::default()
+    };
     // 序列化往返：不落盘（避免污染用户配置目录），验证 serde 语义。
     let text = serde_json::to_string(&config).unwrap();
     let back: AppConfig = serde_json::from_str(&text).unwrap();
     assert_eq!(back, config);
-    // 缺失字段回退默认值。
+    // 缺失字段回退默认值（rules 缺省为 None，表示未自定义）。
     let partial: AppConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(partial, AppConfig::default());
+    assert_eq!(partial.rule_entries(), default_rule_entries());
+    // 缺失 enabled 字段缺省为启用（向前兼容旧配置）。
+    let legacy: AppConfig =
+        serde_json::from_str(r#"{"rules":[{"relative_path":"saves/","level":"Direct"}]}"#).unwrap();
+    assert!(legacy.rule_entries()[0].enabled);
+}
+
+#[test]
+fn rule_path_normalization_and_validation() {
+    use packporter::domain::rules::normalize_rule_path;
+    // 反斜杠统一为斜杠；目录名自动补尾斜杠；显式文件保持文件形态。
+    assert_eq!(normalize_rule_path(" saves\\maps ").unwrap(), "saves/maps/");
+    assert_eq!(normalize_rule_path("servers.dat").unwrap(), "servers.dat");
+    assert_eq!(normalize_rule_path("config/jei/world").unwrap(), "config/jei/world/");
+    assert_eq!(normalize_rule_path("a.b/").unwrap(), "a.b/");
+    assert_eq!(normalize_rule_path("saves//world//").unwrap(), "saves/world/");
+    assert_eq!(normalize_rule_path("./screenshots").unwrap(), "screenshots/");
+    // 非法输入：空、绝对路径、跳级。
+    assert!(normalize_rule_path("   ").is_err());
+    assert!(normalize_rule_path("/").is_err());
+    assert!(normalize_rule_path("E:\\abs\\path").is_err());
+    assert!(normalize_rule_path("saves/../../etc").is_err());
+}
+
+#[test]
+fn rule_conflict_detection_covers_prefix_overlaps() {
+    use packporter::domain::rules::rules_conflict;
+    // 完全相同。
+    assert!(rules_conflict("saves/", "saves/"));
+    assert!(rules_conflict("servers.dat", "servers.dat"));
+    // 目录规则覆盖其子路径。
+    assert!(rules_conflict("saves/", "saves/old/level.dat"));
+    assert!(rules_conflict("saves/old/", "saves/"));
+    // 无关路径不冲突。
+    assert!(!rules_conflict("saves/", "screenshots/"));
+    assert!(!rules_conflict("saves/", "servers.dat"));
+}
+
+#[test]
+fn user_rules_drive_planning_and_disabled_are_skipped() {
+    use packporter::app_config::{AppConfig, UserRuleEntry};
+    use packporter::domain::instance::AssetLevel;
+    use packporter::services::migration_service::MigrationService;
+
+    let base = std::env::temp_dir().join("packporter_test_custom_rules");
+    let _ = std::fs::remove_dir_all(&base);
+    let versions = base.join("versions");
+    let old = versions.join("Old");
+    let new = versions.join("New");
+    std::fs::create_dir_all(old.join("saves")).unwrap();
+    std::fs::create_dir_all(old.join("mymaps/data")).unwrap();
+    std::fs::write(old.join("saves/level.dat"), "level").unwrap();
+    std::fs::write(old.join("mymaps/data/x"), "map").unwrap();
+    std::fs::write(old.join("custom_options.txt"), "fov:0.7\n").unwrap();
+    std::fs::create_dir_all(new.join("saves")).unwrap();
+    std::fs::write(new.join("options.txt"), "fov:0.4\n").unwrap();
+
+    // 自定义规则：禁用默认存档路径，新增 mymaps 目录（L3）与第二个 L4 文件。
+    let mut config = AppConfig::default();
+    let mut entries = packporter::app_config::default_rule_entries();
+    for entry in entries.iter_mut() {
+        if entry.relative_path == "saves/" {
+            entry.enabled = false;
+        }
+    }
+    entries.push(UserRuleEntry {
+        relative_path: "mymaps/".to_string(),
+        level: AssetLevel::ModData,
+        enabled: true,
+    });
+    entries.push(UserRuleEntry {
+        relative_path: "custom_options.txt".to_string(),
+        level: AssetLevel::SmartMerge,
+        enabled: true,
+    });
+    config.rules = Some(entries);
+
+    // 生效注册表：禁用规则被过滤，自定义规则按级别顺序排列。
+    let registry = config.effective_registry();
+    assert!(!registry.entries.iter().any(|r| r.relative_path == "saves/"));
+    assert!(registry.entries.iter().any(|r| r.relative_path == "mymaps/"));
+
+    let service = MigrationService::with_rules(versions.clone(), registry);
+    let instances = service.instances.scan_instances().unwrap();
+    let source = instances.iter().find(|p| p.version.dir_name == "Old").unwrap();
+    let target = instances.iter().find(|p| p.version.dir_name == "New").unwrap();
+    let plan = service
+        .plan_migration(source, target, packporter::domain::instance::MigrationOptions::all_enabled())
+        .unwrap();
+
+    // 禁用的默认路径不进入计划；自定义路径按其级别语义执行。
+    assert!(
+        !plan.entries.iter().any(|e| e.rule.relative_path == "saves/"),
+        "禁用规则不应进入计划"
+    );
+    let maps_entry = plan.entries.iter().find(|e| e.rule.relative_path == "mymaps/").unwrap();
+    assert!(maps_entry.decisions.iter().any(|d| d.relative_path == "mymaps/data/x"));
+
+    // 执行：自定义目录复制落盘；两个 L4 文件各自按规则路径合并写回。
+    let outcome = service.execute_plan(&plan, true, &mut |_| {}).unwrap();
+    assert!(outcome.success);
+    assert_eq!(std::fs::read_to_string(new.join("mymaps/data/x")).unwrap(), "map");
+    assert!(
+        !new.join("saves/level.dat").exists(),
+        "禁用的存档规则不应产生复制"
+    );
+    assert!(std::fs::read_to_string(new.join("custom_options.txt")).unwrap().contains("fov:0.7"));
+    assert!(std::fs::read_to_string(new.join("options.txt")).unwrap().contains("fov:0.4"));
+    std::fs::remove_dir_all(&base).ok();
 }
 
 // Path 导入占位：供后续路径断言扩展使用。

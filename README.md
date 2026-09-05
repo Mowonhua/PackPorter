@@ -4,12 +4,14 @@ Minecraft JAVA 版整合包平滑迁移工具。升级整合包新版本时，�
 
 ## 资产分级策略
 
-| 级别 | 目标 | 策略 |
+| 级别 | 默认目标 | 策略 |
 | --- | --- | --- |
 | L1 Direct | `saves/`、`servers.dat`、`screenshots/`、`schematics/` | 直接复制 |
 | L2 Incremental | `resourcepacks/`、`shaderpacks/` | 增量合并：旧有新缺才复制，同名保留新版 |
 | L3 ModData | `xaero/`、`journeymap/`、`config/xaero/`、`config/jei/world/`、`local/` 等 | 整目录直接复制 |
 | L4 SmartMerge | `options.txt` | 白名单智能合并，严禁整文件覆盖 |
+
+上表路径为**首次使用的默认值**：设置页每级内容行末尾的「配置」入口可对各级路径增删改、逐条启用/禁用，自定义规则持久化到用户配置，生成计划时代码不依赖任何硬编码路径。
 
 L4 合并语义（`OptionsMergeEngine`）：
 
@@ -27,13 +29,13 @@ Rust + Slint 桌面应用，三层架构（领域层无 IO，服务层编排，�
 - **模块 B `OptionsMergeEngine`**：`merge_options(old, new)` 解析为键值映射后按白名单+规则合并；`merge_maps` 纯函数实现供测试与 UI 预览复用。
 - **模块 C `BackupEngine`**：写前对将被覆盖的既有文件做增量 Zip 镜像（`backups/<时间戳>-pre-migrate.zip`）；`MigrationTransaction` 实现类事务——执行前内存快照，逐动作登记补偿（Delete 新建项 / Restore 覆盖项），任一失败立即逆序回滚并返回 `RolledBack` 报告。
 - **模块 D `FolderWatcherService`**：notify 监控 `versions/` 新目录事件，SnapshotProbe 连续 3 轮（800ms 间隔）快照一致判定"解压完成"，事件经 mpsc + `slint::invoke_from_event_loop` 唤起 UI。
-- **配置持久化 `AppConfig`**：`%APPDATA%/packporter/config.json`，记录 versions 路径、最近选择与各级迁移开关，原子写防止配置损坏。
+- **配置持久化 `AppConfig`**：`%APPDATA%/packporter/config.json`，记录 versions 路径、最近选择、各级迁移开关与自定义迁移规则（`rules` 缺省回退内置默认），原子写防止配置损坏。
 
 ## 构建与运行
 
 ```powershell
 cargo run                      # 启动 GUI
-cargo test                     # 19 项集成测试（含端到端迁移用例）
+cargo test                     # 23 项单元/集成测试（含端到端迁移）+ UI 回调集成测试
 cargo run --example smoke_real -- "E:\你的\.minecraft\versions"   # 对真实目录只读扫描 + 合并预览
 cargo build --release
 ```

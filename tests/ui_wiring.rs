@@ -4,7 +4,8 @@
 //!           全部等待都有超时上限，超时即判失败。
 
 use packporter::app_controller::attach;
-use packporter::PackPorterWindow;
+use packporter::app_config::AppConfig;
+use packporter::{PackPorterWindow, RuleEditorApi};
 use slint::{ComponentHandle, Model};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -56,6 +57,53 @@ fn run_all_inner() {
     assert!(ui.get_settings_open(), "open-settings 应打开设置页");
     ui.invoke_cancel_settings();
     assert!(!ui.get_settings_open(), "cancel-settings 应关闭设置页");
+
+    // 设置页规则配置弹窗：默认规则装载、新增/编辑/删除与非法输入拒绝。
+    ui.invoke_open_settings();
+    assert!(!ui.get_saved_rules_dirty(), "打开设置时规则不应标记未保存");
+    ui.invoke_open_rule_dialog(1);
+    assert!(ui.get_rule_dialog_visible(), "配置回调应打开规则弹窗");
+    assert_eq!(ui.get_rule_dialog_rows().row_count(), 4, "L1 默认应有 4 条路径");
+    let api = ui.global::<RuleEditorApi>();
+    assert!(api.invoke_add(1, "mydata/".into()), "合法新增路径应成功");
+    assert_eq!(ui.get_rule_dialog_rows().row_count(), 5, "新增后弹窗行应实时刷新");
+    assert!(ui.get_saved_rules_dirty(), "新增规则后应标记未保存改动");
+    assert!(!api.invoke_add(1, "mydata".into()), "与现有目录互相覆盖的路径应被拒绝");
+    assert!(!api.invoke_add(1, "../escape".into()), "越级路径应被拒绝");
+    assert!(!api.invoke_add(1, "  ".into()), "空路径应被拒绝");
+    assert!(api.invoke_update(1, 4, "mydata2/".into()), "编辑路径应成功");
+    assert_eq!(
+        ui.get_rule_dialog_rows().row_data(4).unwrap().path,
+        "mydata2/",
+        "编辑后行数据应更新"
+    );
+    api.invoke_remove(1, 4);
+    assert_eq!(ui.get_rule_dialog_rows().row_count(), 4, "删除后 L1 应回到 4 条");
+    assert!(!ui.get_saved_rules_dirty(), "改动全部撤销后应清除未保存标记");
+    api.invoke_set_enabled(1, 0, false);
+    assert!(!ui.get_rule_dialog_rows().row_data(0).unwrap().enabled, "禁用后行数据应更新");
+    assert!(ui.get_saved_rules_dirty(), "禁用规则后应标记未保存改动");
+    api.invoke_set_enabled(1, 0, true);
+    assert!(!ui.get_saved_rules_dirty(), "重新启用后未保存标记应清除");
+    // 关闭弹窗并取消设置：草稿不落盘。
+    ui.set_rule_dialog_visible(false);
+    ui.invoke_cancel_settings();
+    assert!(AppConfig::load().rules.is_none(), "取消后配置不应写入规则表");
+
+    // 规则草稿在保存设置后持久化到配置文件。
+    ui.invoke_open_settings();
+    ui.invoke_open_rule_dialog(1);
+    assert!(api.invoke_add(1, "persisted/".into()), "持久化用新增路径应成功");
+    ui.set_rule_dialog_visible(false);
+    // 配置中 versions 目录为空，保存前需填入合法目录（fixture 根）。
+    ui.set_settings_versions_dir(versions_root.to_string_lossy().to_string().into());
+    ui.invoke_save_settings();
+    assert!(!ui.get_settings_open(), "保存后设置页应关闭");
+    let saved_rules = AppConfig::load().rules.expect("保存后配置应包含规则表");
+    assert!(
+        saved_rules.iter().any(|r| r.relative_path == "persisted/"),
+        "保存后的规则表应包含新增路径"
+    );
 
     // attach 已对配置过的目录自动扫描：此处等待模型就绪后直接进入计划阶段。
     let weak_ui = ui.as_weak();

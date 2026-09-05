@@ -27,6 +27,39 @@ pub enum AssetLevel {
     SmartMerge,
 }
 
+impl AssetLevel {
+    /**
+     * 函数职责：给出级别的展示序号（L1=1 … L4=4）。
+     * 输入说明：无。
+     * 输出说明：1-4 的级别序号。
+     * 实现思路：枚举项到序号的一一映射，供配置与 UI 以整数索引级别。
+     */
+    pub fn index(self) -> usize {
+        match self {
+            AssetLevel::Direct => 1,
+            AssetLevel::Incremental => 2,
+            AssetLevel::ModData => 3,
+            AssetLevel::SmartMerge => 4,
+        }
+    }
+
+    /**
+     * 函数职责：按序号反查级别。
+     * 输入说明：index 为 1-4 的级别序号。
+     * 输出说明：命中返回级别；越界返回 None。
+     * 实现思路：序号到枚举项的映射，与 index() 互逆。
+     */
+    pub fn from_index(index: u32) -> Option<Self> {
+        match index {
+            1 => Some(AssetLevel::Direct),
+            2 => Some(AssetLevel::Incremental),
+            3 => Some(AssetLevel::ModData),
+            4 => Some(AssetLevel::SmartMerge),
+            _ => None,
+        }
+    }
+}
+
 /**
  * 结构职责：复制型资产（L1/L2/L3）中单个文件条目的执行决策。
  * 字段说明：由规划器扫描源/目标目录对比后产出；L4 条目不产生本结构（用 MergeOutcome）。
@@ -132,7 +165,7 @@ pub struct AssetRule {
 /**
  * 结构职责：迁移计划中单个资产条目的执行决策与统计。
  * 字段说明：复制型条目（L1/L2/L3）的 decisions 逐文件记录；L4 条目 decisions 为空，
- *           明细承载于 MigrationPlan.options_result，total_items 等于合并键数。
+ *           明细承载于 MigrationPlan.options_results，total_items 等于合并键数。
  * 约束条件：total_items 是决策/明细数量的冗余计数，供 UI 直接显示。
  */
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,9 +231,23 @@ impl MigrationOptions {
 }
 
 /**
+ * 结构职责：单个 L4 偏好文件的合并计划：规则相对路径 + 该文件的合并结果。
+ * 字段说明：relative_path 为实例根目录下的文件路径（来自 L4 规则，不硬编码）；
+ *           result 承载逐键合并明细与最终键值序列。
+ * 约束条件：relative_path 必须与产出它的 L4 规则一致；执行器据此定位写回目标。
+ */
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionsMergeOutcome {
+    /// 关联 L4 规则的相对路径（文件）。
+    pub relative_path: String,
+    /// 该文件的合并结果。
+    pub result: crate::domain::merge::MergeResult,
+}
+
+/**
  * 结构职责：完整迁移计划，由规划器产出、确认页消费、执行器消费。
  * 字段说明：backup_dir 在计划阶段即确定命名，但目录在执行阶段才创建；
- *           options_result 承载 L4 的逐键合并明细；options 为计划时快照的迁移选项。
+ *           options_results 承载各 L4 文件的逐键合并明细；options 为计划时快照的迁移选项。
  * 约束条件：entries 的相对路径互不重叠；source 与 target 实例目录不得相同。
  */
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,8 +263,9 @@ pub struct MigrationPlan {
     pub entries: Vec<AssetPlanEntry>,
     /// 执行阶段将创建的备份目录绝对路径。
     pub backup_dir: PathBuf,
-    /// L4 options 智能合并明细；计划不含 L4 条目时为 None。
-    pub options_result: Option<crate::domain::merge::MergeResult>,
+    /// 各 L4 规则文件的合并明细；无 L4 条目或 L4 关闭时为空。
+    #[serde(default)]
+    pub options_results: Vec<OptionsMergeOutcome>,
 }
 
 /**

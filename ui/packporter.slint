@@ -22,6 +22,23 @@ export struct PlanEntryView {
     dimmed: bool,
 }
 
+// 设置页规则编辑器单行数据：一条迁移路径及其启用状态。
+export struct RuleRowView {
+    /// 迁移相对路径（目录以 / 结尾）。
+    path: string,
+    /// 是否启用该规则。
+    enabled: bool,
+}
+
+// 规则编辑桥：级别面板组件经此调用 Rust 侧增删改回调，避免逐实例转发。
+// 级别以序号 1-4 表示 L1-L4；add/update 返回 false 表示校验失败（保持编辑态）。
+export global RuleEditorApi {
+    callback add(int, string) -> bool;
+    callback update(int, int, string) -> bool;
+    callback remove(int, int);
+    callback set-enabled(int, int, bool);
+}
+
 // 计划明细行：固定高度，供 ListView 逐条渲染。
 component PlanRow inherits Rectangle {
     in property <PlanEntryView> entry;
@@ -162,19 +179,281 @@ component WindowControlButton inherits Rectangle {
     accessible-action-default => { root.clicked(); }
 }
 
-// 设置页的单行开关：开关 + 主标题 + 一句说明。
-component SettingRow inherits HorizontalLayout {    in property <string> label;
-    in property <string> description;
+// 幽灵按钮：无边框小尺寸操作按钮，悬停显示浅色底；danger 悬停转红色（删除类）。
+component GhostButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> danger: false;
+    in property <color> text-color: #4b5563;
+    in property <length> font-size: 12px;
+    callback clicked();
+    height: 24px;
+    border-radius: 5px;
+    background: ta.has-hover ? (root.danger ? #fee2e2 : #eef1f5) : transparent;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        Text {
+            text: root.text;
+            font-size: root.font-size;
+            vertical-alignment: center;
+            color: ta.has-hover ? (root.danger ? #b91c1c : #1f2937) : root.text-color;
+        }
+    }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+}
+
+// 主操作按钮：默认深色；accent 为 true 时蓝色高亮并呼吸闪烁提醒未保存改动。
+component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> accent: false;
+    callback clicked();
+    // 脉冲相位：Timer 周期翻转，驱动背景在两个蓝色间平滑往复。
+    property <bool> pulse-phase: false;
+    height: 30px;
+    min-width: 68px;
+    border-radius: 6px;
+    background: !root.accent ? (ta.has-hover ? #1f2937 : #374151)
+                             : (root.pulse-phase ? #1d4ed8 : #3b82f6);
+    animate background { duration: 400ms; easing: ease-in-out; }
+    Timer {
+        interval: 450ms;
+        running: root.accent;
+        triggered => { root.pulse-phase = !root.pulse-phase; }
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        Text {
+            text: root.text;
+            color: white;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+}
+
+// 设置页的单行开关：开关 + 主标题；可带行尾"配置"入口。
+component SettingRow inherits HorizontalLayout {
+    in property <string> label;
     in-out property <bool> checked;
+    in property <bool> has-config: false;
+    callback configure();
     spacing: 10px;
     Switch {
-        y: 2px;
         checked <=> root.checked;
     }
+    Text {
+        text: root.label;
+        font-weight: 600;
+        color: #1f2937;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    if root.has-config: GhostButton {
+        text: "配置";
+        clicked => { root.configure(); }
+    }
+}
+
+// 规则编辑单行：启用开关 + 路径展示；编辑态切换为输入框 + 保存/取消。
+component RuleEditorRow inherits Rectangle {
+    in property <RuleRowView> entry;
+    in property <int> index;
+    in property <int> level;
+    in-out property <int> edit-index: -1;
+    in-out property <string> edit-text;
+    height: 30px;
+    border-radius: 4px;
+    background: row-ta.has-hover ? #eef1f5 : transparent;
+    row-ta := TouchArea { }
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 2px;
+        spacing: 4px;
+        Switch {
+            checked: root.entry.enabled;
+            toggled => { RuleEditorApi.set-enabled(root.level, root.index, self.checked); }
+        }
+        if root.edit-index == root.index: LineEdit {
+            text <=> root.edit-text;
+            horizontal-stretch: 1;
+            accepted => {
+                if (RuleEditorApi.update(root.level, root.index, root.edit-text)) {
+                    root.edit-index = -1;
+                }
+            }
+        }
+        if root.edit-index != root.index: Text {
+            text: root.entry.path;
+            horizontal-stretch: 1;
+            overflow: elide;
+            vertical-alignment: center;
+            font-size: 12px;
+            color: root.entry.enabled ? #1f2937 : #9ca3af;
+        }
+        if root.edit-index == root.index: GhostButton {
+            text: "保存";
+            text-color: #15803d;
+            clicked => {
+                if (RuleEditorApi.update(root.level, root.index, root.edit-text)) {
+                    root.edit-index = -1;
+                }
+            }
+        }
+        if root.edit-index == root.index: GhostButton {
+            text: "取消";
+            clicked => { root.edit-index = -1; }
+        }
+        if root.edit-index != root.index: GhostButton {
+            text: "编辑";
+            clicked => {
+                root.edit-text = root.entry.path;
+                root.edit-index = root.index;
+            }
+        }
+        if root.edit-index != root.index: GhostButton {
+            text: "删除";
+            danger: true;
+            // 删除会使后续行号位移，先退出编辑态防止改错行。
+            clicked => {
+                root.edit-index = -1;
+                RuleEditorApi.remove(root.level, root.index);
+            }
+        }
+    }
+}
+
+// 单个级别的规则编辑面板：路径清单（可滚动）+ 添加行 + 书写提示。
+// 供规则配置弹窗承载，高度由弹窗约束，路径多时清单区内部滚动。
+component RuleEditorPanel inherits Rectangle {
+    in property <int> level;
+    in property <[RuleRowView]> rows;
+    property <int> edit-index: -1;
+    property <string> edit-text;
+    property <string> new-path;
+    background: #f8fafc;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: #e5e7eb;
     VerticalLayout {
-        spacing: 1px;
-        Text { text: root.label; font-weight: 600; color: #1f2937; vertical-alignment: center; }
-        Text { text: root.description; font-size: 11px; color: #6b7280; wrap: word-wrap; vertical-alignment: center; }
+        padding: 10px;
+        spacing: 6px;
+        if root.rows.length == 0: Text {
+            text: "该级别暂无迁移路径，可在下方添加。";
+            font-size: 12px;
+            color: #9ca3af;
+        }
+        Flickable {
+            vertical-stretch: 1;
+            // Flickable 不给子元素排布语义，裸 for 会堆叠在原点；
+            // 用 alignment: start 的布局承载行清单，行数少时也不会被拉伸摊满。
+            VerticalLayout {
+                alignment: start;
+                for r[i] in root.rows: RuleEditorRow {
+                    entry: r;
+                    index: i;
+                    level: root.level;
+                    edit-index <=> root.edit-index;
+                    edit-text <=> root.edit-text;
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            LineEdit {
+                text <=> root.new-path;
+                placeholder-text: "输入 .minecraft/ 下的相对路径";
+                horizontal-stretch: 1;
+                accepted => {
+                    if (RuleEditorApi.add(root.level, root.new-path)) {
+                        root.new-path = "";
+                    }
+                }
+            }
+            GhostButton {
+                text: "添加";
+                text-color: #1d4ed8;
+                clicked => {
+                    if (RuleEditorApi.add(root.level, root.new-path)) {
+                        root.new-path = "";
+                    }
+                }
+            }
+        }
+    }
+}
+
+// 规则配置弹窗：模态遮罩 + 居中卡片，承载单个级别的路径编辑面板。
+component RuleDialog inherits Rectangle {
+    in property <string> title;
+    in property <int> level;
+    in property <[RuleRowView]> rows;
+    callback close();
+    width: 100%;
+    height: 100%;
+    // Slint 颜色字面量为 #RRGGBBAA：40% 黑色遮罩压暗背景。
+    background: #00000066;
+    // 点击遮罩关闭；卡片内的空白点击由卡片自持 TouchArea 吞掉，防止误关。
+    TouchArea {
+        clicked => { root.close(); }
+    }
+    Rectangle {
+        width: min(640px, parent.width - 48px);
+        height: min(520px, parent.height - 48px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: white;
+        border-radius: 10px;
+        TouchArea { }
+        VerticalLayout {
+            padding: 16px;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.title;
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: #1f2937;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                GhostButton {
+                    text: "×";
+                    font-size: 16px;
+                    clicked => { root.close(); }
+                }
+            }
+            RuleEditorPanel {
+                level: root.level;
+                rows: root.rows;
+                vertical-stretch: 1;
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "完成";
+                    primary: true;
+                    clicked => { root.close(); }
+                }
+            }
+        }
     }
 }
 
@@ -233,6 +512,32 @@ export component PackPorterWindow inherits Window {
     in-out property <bool> settings-include-packs: true;
     in-out property <bool> settings-include-moddata: true;
     in-out property <bool> settings-include-options: true;
+    // 规则配置弹窗（模态）：点击级别行的「配置」打开，展示该级别的路径编辑面板。
+    in-out property <bool> rule-dialog-visible: false;
+    in-out property <int> rule-dialog-level: 1;
+    in-out property <string> rule-dialog-title: "";
+    in-out property <[RuleRowView]> rule-dialog-rows: [];
+
+    // ---- 未保存改动检测（打开设置页时由 Rust 侧写入已保存快照） ----
+    in-out property <string> saved-versions-dir: "";
+    in-out property <bool> saved-auto-backup: true;
+    in-out property <bool> saved-include-saves: true;
+    in-out property <bool> saved-include-packs: true;
+    in-out property <bool> saved-include-moddata: true;
+    in-out property <bool> saved-include-options: true;
+    // 规则草稿是否与已保存配置不同（规则回调实时维护）。
+    in-out property <bool> saved-rules-dirty: false;
+
+    // 是否存在未保存的设置改动：驱动保存按钮高亮提醒。
+    pure function settings-dirty() -> bool {
+        return saved-versions-dir != settings-versions-dir
+            || saved-auto-backup != settings-auto-backup
+            || saved-include-saves != settings-include-saves
+            || saved-include-packs != settings-include-packs
+            || saved-include-moddata != settings-include-moddata
+            || saved-include-options != settings-include-options
+            || saved-rules-dirty;
+    }
 
     // ---- 无边框窗口镶边（供 Rust 命中测试子类读取，逻辑像素） ----
     // 标题栏整条高度：条带内、控制区之前为可拖动区（齿轮片段除外）。
@@ -265,6 +570,8 @@ export component PackPorterWindow inherits Window {
     callback cancel-settings();
     callback save-settings();
     callback browse-versions-dir();
+    // 打开指定级别（1-4）的迁移路径配置弹窗。
+    callback open-rule-dialog(int);
 
     // 选择变化即自动生成计划；合法性（是否已扫描、索引是否有效、是否忙碌）由 Rust 侧守卫。
     changed source-index => { root.plan-requested(); }
@@ -471,12 +778,6 @@ export component PackPorterWindow inherits Window {
                             clicked => { root.browse-versions-dir(); }
                         }
                     }
-                    Text {
-                        text: "指向 .minecraft 下的 versions 目录；修改并保存后会自动重新扫描实例。";
-                        font-size: 11px;
-                        color: #6b7280;
-                        wrap: word-wrap;
-                    }
                 }
 
                 Card {
@@ -485,28 +786,31 @@ export component PackPorterWindow inherits Window {
                         spacing: 12px;
                         SettingRow {
                             label: "迁移前自动备份";
-                            description: "覆盖目标实例同名文件前，先把目标现状打包为 Zip 备份。";
                             checked <=> root.settings-auto-backup;
                         }
                         SettingRow {
                             label: "存档与个人资产（L1）";
-                            description: "saves、servers.dat、screenshots、schematics，直接复制。";
                             checked <=> root.settings-include-saves;
+                            has-config: true;
+                            configure => { root.open-rule-dialog(1); }
                         }
                         SettingRow {
                             label: "资源包与光影包（L2）";
-                            description: "resourcepacks、shaderpacks，增量合并。";
                             checked <=> root.settings-include-packs;
+                            has-config: true;
+                            configure => { root.open-rule-dialog(2); }
                         }
                         SettingRow {
                             label: "模组数据（L3）";
-                            description: "Xaero、Jei 等辅助模组的个人数据，直接复制。";
                             checked <=> root.settings-include-moddata;
+                            has-config: true;
+                            configure => { root.open-rule-dialog(3); }
                         }
                         SettingRow {
                             label: "客户端偏好（L4）";
-                            description: "options.txt 按白名单键位智能合并。";
                             checked <=> root.settings-include-options;
+                            has-config: true;
+                            configure => { root.open-rule-dialog(4); }
                         }
                     }
                 }
@@ -520,9 +824,10 @@ export component PackPorterWindow inherits Window {
                         text: "取消";
                         clicked => { root.cancel-settings(); }
                     }
-                    Button {
+                    ActionButton {
                         text: "保存";
-                        primary: true;
+                        // 默认深色；有未保存改动时切换为醒目蓝色提醒保存。
+                        accent: root.settings-dirty();
                         clicked => { root.save-settings(); }
                     }
                 }
@@ -545,5 +850,13 @@ export component PackPorterWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ==================== 规则配置弹窗（模态，覆盖全窗口含标题栏） ====================
+    if root.settings-open && root.rule-dialog-visible: RuleDialog {
+        title: root.rule-dialog-title;
+        level: root.rule-dialog-level;
+        rows: root.rule-dialog-rows;
+        close => { root.rule-dialog-visible = false; }
     }
 }

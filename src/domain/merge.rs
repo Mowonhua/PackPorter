@@ -46,7 +46,7 @@ pub struct MergeOutcome {
  * 字段说明：outcomes 保序（按新文件键序优先，旧版独有键追加在后）。
  * 约束条件：merged 序列化后必须能被原样写回 options.txt 且可被游戏解析。
  */
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeResult {
     /// 逐键决策明细。
     pub outcomes: Vec<MergeOutcome>,

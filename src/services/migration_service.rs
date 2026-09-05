@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::domain::error::{PackError, PackResult};
 use crate::domain::instance::{
     AssetLevel, AssetPlanEntry, AssetRule, DecisionAction, InstanceProfile, MergeDecision,
-    MigrationOptions, MigrationPlan, MigrationProgress, TransactionOutcome,
+    MigrationOptions, MigrationPlan, MigrationProgress, OptionsMergeOutcome, TransactionOutcome,
 };
 use crate::domain::rules::{built_in_rules, RuleRegistry};
 use crate::domain::transaction::{MigrationTransaction, TransactionAction};
@@ -42,7 +42,7 @@ impl MigrationService {
      * 输入说明：versions_root 为 versions/ 目录。
      * 输出说明：始终成功。
      * 实现思路：组装各子服务，事务实现指向 backup 引擎（默认备份根为空路径，
-     *           执行阶段以 plan.backup_dir 为准重新构造）。
+     *           执行阶段以 plan.backup_dir 为准重新构造）；规则表使用内置默认。
      */
     pub fn new(versions_root: PathBuf) -> Self {
         let instances = InstanceService::new(versions_root);
@@ -59,11 +59,24 @@ impl MigrationService {
     }
 
     /**
+     * 函数职责：以指定规则表构造编排器（规则来自用户配置）。
+     * 输入说明：versions_root 为 versions/ 目录；rules 为生效规则注册表。
+     * 输出说明：始终成功。
+     * 实现思路：复用 new() 装配后替换规则表，路径完全由调用方注入，不硬编码。
+     */
+    pub fn with_rules(versions_root: PathBuf, rules: RuleRegistry) -> Self {
+        let mut service = Self::new(versions_root);
+        service.rules = rules;
+        service
+    }
+
+    /**
      * 函数职责：对比源/目标实例，产出完整迁移计划（不写入任何文件）。
      * 输入说明：source 与 target 为两份实例画像；options 为本次迁移的范围开关。
      * 输出说明：完整计划（携带选项快照）；源与目标同目录时返回 InvalidPlan。
      * 实现思路：遍历规则表并按选项过滤关闭的级别 → 复制型规则按级别扫描源目录
-     *           （L2 差集过滤）→ L4 预合并 options → 汇总条目与备份目录命名。
+     *           （L2 差集过滤）→ L4 规则按各自路径预合并偏好文件 →
+     *           汇总条目与备份目录命名。
      */
     pub fn plan_migration(
         &self,
@@ -78,29 +91,40 @@ impl MigrationService {
             ));
         }
         let mut entries = Vec::new();
+        let mut options_results = Vec::new();
         for rule in &self.rules.entries {
             // 选项关闭的级别整级跳过，不产生条目。
             if !options.allows(rule.level) {
                 continue;
             }
             let entry = match rule.level {
-                AssetLevel::SmartMerge => self.plan_options_entry(rule, source, target),
+                AssetLevel::SmartMerge => {
+                    // L4：按规则自身路径定位偏好文件，预合并并随计划携带明细；
+                    // 源文件缺失视为空条目（新装实例可能尚未生成该文件）。
+                    let old_path = source.root_dir.join(&rule.relative_path);
+                    let result = if old_path.exists() {
+                        self.merge_engine
+                            .merge_options(&old_path, &target.root_dir.join(&rule.relative_path))
+                            .ok()
+                    } else {
+                        None
+                    };
+                    match result {
+                        Some(result) => {
+                            let total_items = result.merged.len();
+                            options_results.push(OptionsMergeOutcome {
+                                relative_path: rule.relative_path.clone(),
+                                result,
+                            });
+                            AssetPlanEntry { rule: rule.clone(), decisions: Vec::new(), total_items }
+                        }
+                        None => AssetPlanEntry { rule: rule.clone(), decisions: Vec::new(), total_items: 0 },
+                    }
+                }
                 _ => self.plan_copy_entry(rule, source, target),
             };
             entries.push(entry);
         }
-
-        // L4 合并：目标缺失 options.txt 时以"旧值初始化新版"处理；L4 关闭时不合并。
-        let options_result = if options.include_options {
-            self.merge_engine
-                .merge_options(
-                    &source.root_dir.join("options.txt"),
-                    &target.root_dir.join("options.txt"),
-                )
-                .ok()
-        } else {
-            None
-        };
 
         // 备份目录：目标实例 backups/ 下按时间戳命名的子目录集合的根。
         let backup_dir = target.root_dir.join("backups");
@@ -111,7 +135,7 @@ impl MigrationService {
             target: target.clone(),
             entries,
             backup_dir,
-            options_result,
+            options_results,
         })
     }
 
@@ -150,7 +174,7 @@ impl MigrationService {
             .flat_map(|entry| entry.decisions.iter())
             .filter(|d| d.action == DecisionAction::CopyFromOld)
             .count();
-        let merged_keys = plan.options_result.as_ref().map(|r| r.merged.len()).unwrap_or(0);
+        let merged_keys: usize = plan.options_results.iter().map(|o| o.result.merged.len()).sum();
         Ok(TransactionOutcome {
             success: true,
             rolled_back: false,
@@ -160,22 +184,24 @@ impl MigrationService {
     }
 
     /**
-     * 函数职责：为计划的 L4 合并结果生成将要写回的 options 文本（供 UI 预览）。
-     * 输入说明：plan 中承载的 options_result。
-     * 输出说明：合并后的 options 文本；计划不含 L4 明细时返回 None。
-     * 实现思路：直接序列化 options_result。
+     * 函数职责：为计划的 L4 合并结果生成将写回的文本预览（供 UI 与冒烟示例）。
+     * 输入说明：plan 中承载的 options_results。
+     * 输出说明：各偏好文件的 (相对路径, 合并后文本) 列表；无 L4 明细时为空。
+     * 实现思路：逐条序列化 options_results。
      */
-    pub fn preview_options(&self, plan: &MigrationPlan) -> Option<String> {
-        plan.options_result
-            .as_ref()
-            .map(|result| self.merge_engine.serialize(result))
+    pub fn preview_options(&self, plan: &MigrationPlan) -> Vec<(String, String)> {
+        plan.options_results
+            .iter()
+            .map(|outcome| (outcome.relative_path.clone(), self.merge_engine.serialize(&outcome.result)))
+            .collect()
     }
 
     /**
      * 函数职责：将计划转换为扁平的事务动作清单（执行器输入）。
      * 输入说明：plan 为待执行计划。
      * 输出说明：复制动作在前（L1→L2→L3），L4 WriteText 在后，顺序即执行顺序。
-     * 实现思路：遍历条目决策生成 CopyFile；options_result 生成对目标 options.txt 的 WriteText。
+     * 实现思路：遍历条目决策生成 CopyFile；options_results 按各自规则路径生成
+     *           对目标文件的 WriteText。
      */
     pub fn to_actions(&self, plan: &MigrationPlan) -> Vec<TransactionAction> {
         let mut actions = Vec::new();
@@ -190,11 +216,11 @@ impl MigrationService {
                 });
             }
         }
-        // L4：合并文本整体写入目标 options.txt。
-        if let Some(result) = &plan.options_result {
-            let text = self.merge_engine.serialize(result);
+        // L4：合并文本整体写入目标偏好文件（路径来自规则，不硬编码）。
+        for outcome in &plan.options_results {
+            let text = self.merge_engine.serialize(&outcome.result);
             actions.push(TransactionAction::WriteText {
-                destination: plan.target.root_dir.join("options.txt"),
+                destination: plan.target.root_dir.join(&outcome.relative_path),
                 content: text,
             });
         }
@@ -244,30 +270,6 @@ impl MigrationService {
         }
         let total_items = decisions.len();
         AssetPlanEntry { rule: rule.clone(), decisions, total_items }
-    }
-
-    /**
-     * 函数职责：为 L4 规则生成计划条目（决策明细承载于 options_result）。
-     * 输入说明：rule 为 L4 规则；source/target 为实例画像。
-     * 输出说明：decisions 为空、total_items 为合并键数的条目；源文件缺失时为空条目。
-     * 实现思路：源 options.txt 存在时预合并并统计键数。
-     */
-    fn plan_options_entry(
-        &self,
-        rule: &AssetRule,
-        source: &InstanceProfile,
-        target: &InstanceProfile,
-    ) -> AssetPlanEntry {
-        let old_path = source.root_dir.join("options.txt");
-        if !old_path.exists() {
-            return AssetPlanEntry { rule: rule.clone(), decisions: Vec::new(), total_items: 0 };
-        }
-        let total_items = self
-            .merge_engine
-            .merge_options(&old_path, &target.root_dir.join("options.txt"))
-            .map(|r| r.merged.len())
-            .unwrap_or(0);
-        AssetPlanEntry { rule: rule.clone(), decisions: Vec::new(), total_items }
     }
 }
 

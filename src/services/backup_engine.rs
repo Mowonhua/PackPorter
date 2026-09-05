@@ -60,11 +60,11 @@ impl BackupEngine {
             .filter(|p| p.is_file())
             .collect::<Vec<_>>();
 
-        // L4 合并同样覆盖写入既有 options.txt，必须纳入备份范围。
-        if plan.options_result.is_some() {
-            let options_path = plan.target.root_dir.join("options.txt");
-            if options_path.is_file() && !targets.contains(&options_path) {
-                targets.push(options_path);
+        // L4 合并同样覆盖写入既有偏好文件，必须纳入备份范围（路径来自计划规则）。
+        for outcome in &plan.options_results {
+            let merged_path = plan.target.root_dir.join(&outcome.relative_path);
+            if merged_path.is_file() && !targets.contains(&merged_path) {
+                targets.push(merged_path);
             }
         }
 

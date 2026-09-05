@@ -54,15 +54,17 @@ fn main() {
                         entry.rule.level, entry.rule.relative_path, entry.total_items
                     );
                 }
-                if let Some(result) = &plan.options_result {
+                for outcome in &plan.options_results {
                     println!(
-                        "  options 合并摘要: {}",
-                        packporter::services::options_merge::summarize(&result.outcomes)
+                        "  {} 合并摘要: {}",
+                        outcome.relative_path,
+                        packporter::services::options_merge::summarize(&outcome.result.outcomes)
                     );
-                    let preview = migration.preview_options(&plan).unwrap_or_default();
-                    let lines = preview.lines().count();
-                    println!("  合并后 options 共 {lines} 行（预览前 8 行）:");
-                    for line in preview.lines().take(8) {
+                }
+                for (path, text) in migration.preview_options(&plan) {
+                    let lines = text.lines().count();
+                    println!("  合并后 {path} 共 {lines} 行（预览前 8 行）:");
+                    for line in text.lines().take(8) {
                         println!("    {line}");
                     }
                 }
