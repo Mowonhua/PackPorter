@@ -1,10 +1,11 @@
 //! 文件职责：模块 C —— 轻量 Zip 镜像备份与类事务执行（失败自动回滚）。
 //! 定义范围：BackupEngine 结构、备份/还原/列出实现与 MigrationTransaction 实现。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::domain::error::{PackError, PackResult};
-use crate::domain::instance::{MigrationPlan, MigrationProgress};
+use crate::domain::instance::{DecisionAction, MigrationPlan, MigrationProgress};
 use crate::domain::transaction::{
     MigrationTransaction, RollbackReport, TransactionAction, UndoAction,
 };
@@ -15,7 +16,7 @@ use crate::infra::zip_archive;
 /**
  * 结构职责：备份与事务引擎的配置载体。
  * 字段说明：backup_root 为全部备份的根目录，默认在目标实例内 backups/ 下。
- * 约束条件：backup_root 必须可写；zip 镜像不可用时降级为目录复制备份。
+ * 约束条件：backup_root 必须可写；Zip 创建失败时中止迁移，避免无备份覆盖。
  */
 #[derive(Clone)]
 pub struct BackupEngine {
@@ -51,19 +52,22 @@ impl BackupEngine {
         plan: &MigrationPlan,
         progress: &mut dyn FnMut(MigrationProgress),
     ) -> PackResult<PathBuf> {
-        // 收集将被覆盖的既有目标文件（CopyFile 目标中已存在的部分）。
+        // 与 to_actions 的复制条件保持一致：KeepNew 和 SourceMissing 不会写入目标，
+        // 不应读取或压缩这些文件，尤其是通常体积较大的同名资源包和光影包。
+        let mut seen = HashSet::new();
         let mut targets = plan
             .entries
             .iter()
             .flat_map(|entry| entry.decisions.iter())
+            .filter(|decision| decision.action == DecisionAction::CopyFromOld)
             .map(|decision| plan.target.root_dir.join(&decision.relative_path))
-            .filter(|p| p.is_file())
+            .filter(|path| seen.insert(path.clone()) && path.is_file())
             .collect::<Vec<_>>();
 
         // L4 合并同样覆盖写入既有偏好文件，必须纳入备份范围（路径来自计划规则）。
         for outcome in &plan.options_results {
             let merged_path = plan.target.root_dir.join(&outcome.relative_path);
-            if merged_path.is_file() && !targets.contains(&merged_path) {
+            if seen.insert(merged_path.clone()) && merged_path.is_file() {
                 targets.push(merged_path);
             }
         }
@@ -76,7 +80,6 @@ impl BackupEngine {
         let zip_path = self
             .backup_root
             .join(zip_archive::backup_file_name(chrono::Local::now()));
-        let total = targets.len();
         // 适配 zip 打包回调签名 (done, total) 到统一进度事件。
         let mut report_progress = |done: usize, total_items: usize| {
             progress(MigrationProgress {
@@ -85,7 +88,6 @@ impl BackupEngine {
                 current: "备份中".to_string(),
             });
         };
-        let _ = total;
         zip_archive::pack_files(&targets, &plan.target.root_dir, &zip_path, &mut report_progress)?;
         Ok(zip_path)
     }

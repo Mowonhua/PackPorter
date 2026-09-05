@@ -1,7 +1,7 @@
 //! 文件职责：实现 Zip 镜像备份的打包与还原原语，供 BackupEngine 复用。
 //! 定义范围：zip 打包函数、还原函数与备份命名契约；不含事务编排。
 
-use std::io::Read;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
 use crate::domain::error::{PackError, PackResult};
@@ -14,7 +14,7 @@ use crate::domain::transaction::RollbackReport;
  * 输入说明：files 为将被覆盖的既有文件绝对路径列表；root 为相对路径基准目录；
  *           dest_zip 为输出 zip 绝对路径；progress 上报逐文件进度。
  * 输出说明：成功返回打包文件数；任一文件读取失败即整体失败返回 Backup 错误。
- * 实现思路：zip::ZipWriter 逐条 start_file + copy_file_io，压缩方式 deflate。
+ * 实现思路：逐文件流式写入；已压缩资产直接存储，其余使用快速 Deflate。
  */
 pub fn pack_files(
     files: &[std::path::PathBuf],
@@ -30,10 +30,8 @@ pub fn pack_files(
     }
     let zip_file = std::fs::File::create(dest_zip)
         .map_err(|e| PackError::Backup(format!("创建备份文件失败: {e}")))?;
-    let mut writer = zip::ZipWriter::new(zip_file);
-    // 时间戳选项：使用 zip 库支持的简单文件选项，deflate 压缩。
-    let options: zip::write::SimpleFileOptions =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // 合并 ZIP 头和压缩输出的小块写入；结束时必须显式 flush，不能依赖 Drop 吞掉写入错误。
+    let mut writer = zip::ZipWriter::new(BufWriter::with_capacity(256 * 1024, zip_file));
 
     let total = files.len();
     let mut packed = 0usize;
@@ -45,19 +43,42 @@ pub fn pack_files(
             .to_string_lossy()
             .replace('\\', "/");
         writer
-            .start_file(relative, options)
+            .start_file(relative, backup_options(file))
             .map_err(|e| PackError::Backup(format!("写入 zip 条目失败: {e}")))?;
-        let mut f = std::fs::File::open(file)
-            .map_err(|e| PackError::Backup(format!("读取待备份文件失败 [{}]: {e}", file.display())))?;
+        let mut f = std::fs::File::open(file).map_err(|e| {
+            PackError::Backup(format!("读取待备份文件失败 [{}]: {e}", file.display()))
+        })?;
         std::io::copy(&mut f, &mut writer)
             .map_err(|e| PackError::Backup(format!("压缩写入失败: {e}")))?;
         packed += 1;
         progress(index + 1, total);
     }
-    writer
+    let mut output = writer
         .finish()
         .map_err(|e| PackError::Backup(format!("收尾 zip 失败: {e}")))?;
+    output
+        .flush()
+        .map_err(|e| PackError::Backup(format!("写入备份文件失败: {e}")))?;
     Ok(packed)
+}
+
+fn backup_options(path: &Path) -> zip::write::SimpleFileOptions {
+    // 区域文件的区块负载、压缩包和媒体通常已经压缩，再次 Deflate 消耗 CPU 却收益很小。
+    // 扩展名仅决定压缩策略，不改变任何内容；未知格式仍压缩，读取端兼容两种 ZIP 方法。
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let options = zip::write::SimpleFileOptions::default();
+    match extension.as_str() {
+        "mca" | "mcc" | "zip" | "jar" | "png" | "jpg" | "jpeg" | "ogg" | "gz" => {
+            options.compression_method(zip::CompressionMethod::Stored)
+        }
+        _ => options
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(1)),
+    }
 }
 
 /**
@@ -69,8 +90,8 @@ pub fn pack_files(
 pub fn unpack_to(zip_path: &Path, root: &Path) -> PackResult<RollbackReport> {
     let file = std::fs::File::open(zip_path)
         .map_err(|e| PackError::Backup(format!("打开备份文件失败: {e}")))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| PackError::Backup(format!("备份 zip 损坏: {e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| PackError::Backup(format!("备份 zip 损坏: {e}")))?;
     let mut report = RollbackReport::default();
     for index in 0..archive.len() {
         let mut entry = match archive.by_index(index) {
@@ -98,9 +119,7 @@ pub fn unpack_to(zip_path: &Path, root: &Path) -> PackResult<RollbackReport> {
             let _ = std::fs::create_dir_all(parent);
         }
         let mut content = Vec::new();
-        if entry.read_to_end(&mut content).is_err()
-            || std::fs::write(&target, content).is_err()
-        {
+        if entry.read_to_end(&mut content).is_err() || std::fs::write(&target, content).is_err() {
             report.failed += 1;
             report
                 .log
