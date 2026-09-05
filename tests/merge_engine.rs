@@ -327,7 +327,7 @@ fn plan_and_execute_end_to_end_migrates_assets() {
     let plan = service
         .plan_migration(source, target, packporter::domain::instance::MigrationOptions::all_enabled())
         .unwrap();
-    // L1 存档复制、L2 同名保留新版、L3 地图复制、L4 合并明细存在。
+    // L1 存档复制、L2 同名保留新版、L3 模组复制、L4 合并明细存在。
     let saves_entry = plan.entries.iter().find(|e| e.rule.relative_path == "saves/").unwrap();
     assert!(saves_entry.decisions.iter().any(|d| d.relative_path == "saves/world/level.dat"));
     let packs_entry = plan.entries.iter().find(|e| e.rule.level == AssetLevel::Incremental).unwrap();

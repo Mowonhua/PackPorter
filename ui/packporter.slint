@@ -495,17 +495,17 @@ export component PackPorterWindow inherits Window {
                         }
                         SettingRow {
                             label: "资源包与光影包（L2）";
-                            description: "resourcepacks、shaderpacks，增量合并：旧有新缺才复制。";
+                            description: "resourcepacks、shaderpacks，增量合并。";
                             checked <=> root.settings-include-packs;
                         }
                         SettingRow {
-                            label: "地图与模组数据（L3）";
-                            description: "Xaero、JourneyMap 等辅助模组的个人数据，直接复制。";
+                            label: "模组数据（L3）";
+                            description: "Xaero、Jei 等辅助模组的个人数据，直接复制。";
                             checked <=> root.settings-include-moddata;
                         }
                         SettingRow {
                             label: "客户端偏好（L4）";
-                            description: "options.txt 按白名单键位智能合并，不整文件覆盖。";
+                            description: "options.txt 按白名单键位智能合并。";
                             checked <=> root.settings-include-options;
                         }
                     }

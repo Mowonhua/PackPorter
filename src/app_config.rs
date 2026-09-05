@@ -33,7 +33,7 @@ pub struct AppConfig {
     pub include_saves: bool,
     /// 是否迁移资源/光影包（L2 可关断项，默认开启）。
     pub include_packs: bool,
-    /// 是否迁移地图与辅助模组数据（L3 可关断项，默认开启）。
+    /// 是否迁移模组数据（L3 可关断项，默认开启）。
     pub include_moddata: bool,
     /// 是否执行 options 智能合并（L4 可关断项，默认开启）。
     pub include_options: bool,

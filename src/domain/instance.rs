@@ -158,7 +158,7 @@ pub struct MigrationOptions {
     pub include_saves: bool,
     /// 是否迁移 L2 资源包/光影包。
     pub include_packs: bool,
-    /// 是否迁移 L3 地图与辅助模组数据。
+    /// 是否迁移 L3 模组数据。
     pub include_moddata: bool,
     /// 是否执行 L4 options 智能合并。
     pub include_options: bool,
