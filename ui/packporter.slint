@@ -878,26 +878,15 @@ export component PackPorterWindow inherits Window {
                                     label: "关闭窗口时最小化到托盘";
                                     checked <=> root.settings-close-to-tray;
                                 }
-                                Text {
-                                    text: "开启后，关闭窗口仍会在托盘中运行；可从托盘菜单打开窗口或退出。";
-                                    color: #6b7280;
-                                    wrap: word-wrap;
-                                    font-size: 12px;
-                                }
                             }
 
                             Card {
-                                title: "启动器联动";
+                                title: "自启动";
                                 SettingRow {
-                                    label: "跟随 PCL2 / HMCL 启动与退出";
+                                    label: "跟随启动器启动与退出";
                                     checked <=> root.settings-follow-launchers;
                                 }
-                                Text {
-                                    text: "原启动器备份为 xxx.bak.exe；保存开启后，原 EXE 和旧快捷方式均可联动，并静默启动到托盘。最后一个关联启动器退出后自动关闭。关闭并保存时自动还原原启动器。";
-                                    color: #6b7280;
-                                    wrap: word-wrap;
-                                    font-size: 12px;
-                                }
+
                                 for path[index] in root.settings-launcher-paths: HorizontalLayout {
                                     Text {
                                         text: path;
