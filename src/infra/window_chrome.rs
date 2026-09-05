@@ -15,7 +15,7 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, IsZoomed, PostMessageW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+    GetPropW, SetPropW, RemovePropW, GetWindowRect, IsZoomed, PostMessageW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
     HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, SC_MAXIMIZE, SC_RESTORE,
     WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCDESTROY, WM_SYSCOMMAND,
 };
@@ -44,6 +44,7 @@ const RESIZE_BORDER_LOGICAL: f32 = 6.0;
 const DOUBLE_CLICK_SLOP: i32 = 4;
 /// 子类实例 ID：单窗口应用，取值仅要求进程内唯一。
 const SUBCLASS_ID: usize = 0x5043_4357;
+const CHROME_PROPERTY: windows_sys::core::PCWSTR = windows_sys::w!("PackPorter.WindowChrome");
 
 /**
  * 结构职责：子类过程的随窗口数据：几何探针 + 标题栏双击检测状态。
@@ -62,9 +63,13 @@ struct ChromeState {
  *
  * # Safety
  * hwnd 必须是当前 UI 线程拥有的有效窗口句柄；probe 仅在窗口 UI 线程被调用。
- * 约束条件：必须在窗口所属 UI 线程调用，且每个窗口仅安装一次。
+ * 约束条件：必须在窗口所属 UI 线程调用；重复显示同一窗口时保留已有探针与状态。
  */
 pub unsafe fn install(hwnd: HWND, probe: GeometryProbe) {
+    // 托盘恢复可能复用 HWND；重复 SetWindowSubclass 会覆盖数据指针并泄漏旧状态。
+    if !unsafe { GetPropW(hwnd, CHROME_PROPERTY) }.is_null() {
+        return;
+    }
     let state = Box::new(ChromeState { probe, last_caption_press: Cell::new(None) });
     unsafe {
         // Win11 圆角；Win10 无此属性会返回错误码，属预期降级。
@@ -83,7 +88,16 @@ pub unsafe fn install(hwnd: HWND, probe: GeometryProbe) {
             cyBottomHeight: 1,
         };
         DwmExtendFrameIntoClientArea(hwnd, &margins);
-        SetWindowSubclass(hwnd, Some(chrome_proc), SUBCLASS_ID, Box::into_raw(state) as usize);
+        let pointer = Box::into_raw(state);
+        // 窗口属性记录安装状态，不依赖特定 comctl32 版本的查询导出。
+        if SetPropW(hwnd, CHROME_PROPERTY, pointer.cast()) == 0 {
+            drop(Box::from_raw(pointer));
+            return;
+        }
+        if SetWindowSubclass(hwnd, Some(chrome_proc), SUBCLASS_ID, pointer as usize) == 0 {
+            RemovePropW(hwnd, CHROME_PROPERTY);
+            drop(Box::from_raw(pointer));
+        }
     }
 }
 
@@ -103,6 +117,7 @@ unsafe extern "system" fn chrome_proc(
 ) -> LRESULT {
     match msg {
         WM_NCDESTROY => {
+            RemovePropW(hwnd, CHROME_PROPERTY);
             RemoveWindowSubclass(hwnd, Some(chrome_proc), uid);
             drop(Box::from_raw(data as *mut ChromeState));
         }

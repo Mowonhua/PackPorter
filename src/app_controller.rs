@@ -152,6 +152,7 @@ pub fn attach_with_launcher_hooks(
 ) -> ControllerHandles {
     let config = Arc::new(Mutex::new(AppConfig::load()));
     ui.set_launcher_follow_enabled(config.lock().unwrap().follow_launchers);
+    ui.set_close_to_tray_enabled(config.lock().unwrap().close_to_tray);
     // 未配置目录时给出指向设置页的引导，而不是提示改配置文件。
     ui.set_has_versions_dir(!versions_root.as_os_str().is_empty());
     if versions_root.as_os_str().is_empty() {
@@ -313,6 +314,7 @@ pub fn attach_with_launcher_hooks(
         if ui.get_settings_saving() || ui.get_launcher_selecting() { return; }
         let config = ctx_settings.config.lock().unwrap();
         ui.set_settings_follow_launchers(config.follow_launchers);
+        ui.set_settings_close_to_tray(config.close_to_tray);
         ui.set_settings_launcher_paths(slint::ModelRc::new(slint::VecModel::from(config.launcher_paths.iter().map(|p| slint::SharedString::from(p.as_str())).collect::<Vec<_>>())));
         ui.set_saved_launcher_paths_dirty(false);
         ui.set_settings_versions_dir(config.versions_dir.clone().into());
@@ -483,6 +485,7 @@ pub fn attach_with_launcher_hooks(
         next.include_moddata = ui.get_settings_include_moddata();
         next.include_options = ui.get_settings_include_options();
         next.follow_launchers = ui.get_settings_follow_launchers();
+        next.close_to_tray = ui.get_settings_close_to_tray();
         next.launcher_paths = ui.get_settings_launcher_paths().iter().map(|p| p.to_string()).collect();
         if next.follow_launchers && next.launcher_paths.is_empty() {
             set_status(&ui, "error", "请先选择要关联的 PCL2 / HMCL 启动器。 ");
@@ -529,6 +532,7 @@ pub fn attach_with_launcher_hooks(
                     *config = next.clone();
                 }
                 ui.set_launcher_follow_enabled(next.follow_launchers);
+                ui.set_close_to_tray_enabled(next.close_to_tray);
                 if previous.follow_launchers != next.follow_launchers || previous.launcher_paths != next.launcher_paths {
                     ui.set_launcher_follow_revision(ui.get_launcher_follow_revision().wrapping_add(1));
                 }

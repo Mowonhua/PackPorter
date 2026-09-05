@@ -22,3 +22,6 @@ pub mod launcher_shim;
 
 /// 原路径启动器入口的可逆安装及恢复。
 pub mod launcher_binding;
+
+/// 系统托盘资源、用户动作及已有实例唤起。
+pub mod tray;

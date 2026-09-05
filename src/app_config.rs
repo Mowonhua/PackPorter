@@ -59,6 +59,8 @@ pub struct AppConfig {
     pub auto_backup: bool,
     /// 是否跟随 shim 启动的 PCL2 / HMCL 会话；旧配置缺省关闭。
     pub follow_launchers: bool,
+    /// 关闭窗口时保留托盘运行；旧配置缺省关闭，只有成功保存后才生效。
+    pub close_to_tray: bool,
     /// 用户选择的原启动器 EXE 路径；关闭联动后保留选择，文件恢复由安装器负责。
     pub launcher_paths: Vec<String>,
     /// 是否迁移存档（L1 可关断项，默认开启）。
@@ -90,6 +92,7 @@ impl Default for AppConfig {
             last_target: String::new(),
             auto_backup: true,
             follow_launchers: false,
+            close_to_tray: false,
             launcher_paths: Vec::new(),
             include_saves: true,
             include_packs: true,

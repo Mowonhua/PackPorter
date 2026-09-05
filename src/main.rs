@@ -12,6 +12,40 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
+/// 函数职责：显示主窗口并恢复原生窗口交互。
+/// 输入说明：ui 必须属于事件循环线程；可从初次启动、托盘或重复启动入口调用。
+/// 输出说明：显示失败返回平台错误；成功后安装无边框镶边并请求前台激活。
+/// 实现思路：先显示以创建原生句柄，再安装镶边、还原最小化并激活窗口。
+fn show_main_window(ui: &PackPorterWindow) -> Result<(), slint::PlatformError> {
+    ui.show()?;
+    ui.window().set_minimized(false);
+    install_frameless_chrome(ui.as_weak());
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = ui.window().window_handle();
+        if let Ok(handle) = handle.window_handle() {
+            if let RawWindowHandle::Win32(window) = handle.as_raw() {
+                // 前台权限由 Windows 决定；托盘点击属于用户操作，允许正常激活。
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(
+                        window.hwnd.get() as _,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 函数职责：判断当前是否存在不能随进程退出中断的任务。
+/// 输入说明：读取主线程发布的扫描、迁移、保存和选择状态。
+/// 输出说明：true 时关闭及托盘退出请求必须保留进程。
+/// 实现思路：统一检查已有任务状态，避免不同退出入口绕过同一保护。
+fn exit_blocked(ui: &PackPorterWindow) -> bool {
+    ui.get_busy() || ui.get_executing() || ui.get_settings_saving() || ui.get_launcher_selecting()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let followed = args.iter().any(|arg| arg == "--launcher-follow");
@@ -29,7 +63,18 @@ fn main() {
     };
     let _instance = match instance {
         Ok(Some(guard)) => guard,
-        Ok(None) => return,
+        Ok(None) => {
+            if !followed {
+                // 第一实例可能已持锁但尚未完成托盘初始化；只让重复启动入口短暂等待。
+                for _ in 0..20 {
+                    if packporter::infra::tray::request_show_existing() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            return;
+        }
         Err(error) => {
             eprintln!("无法获取应用实例锁：{error}");
             return;
@@ -41,6 +86,11 @@ fn main() {
 
     // 创建 UI 并把全部交互回调装配到服务层（扫描/计划/执行/设置）。
     let ui = PackPorterWindow::new().expect("UI 创建失败");
+    let tray = packporter::infra::tray::Tray::new();
+    let tray_available = tray.is_ok();
+    if let Err(error) = &tray {
+        eprintln!("托盘不可用，将保留普通窗口模式：{error}");
+    }
     let watcher_state: Arc<Mutex<Option<ActiveWatcher>>> = Arc::new(Mutex::new(None));
     let hook = make_restart_hook(ui.as_weak(), watcher_state.clone());
     let _handles = attach_with_launcher_hook(
@@ -54,13 +104,42 @@ fn main() {
     );
     let weak = ui.as_weak();
     ui.window().on_close_requested(move || {
-        // 配置保存和启动器选择必须完整收尾，不能随关闭窗口中断操作。
-        if weak.upgrade().is_some_and(|ui| ui.get_settings_saving() || ui.get_launcher_selecting()) {
-            slint::CloseRequestResponse::KeepWindowShown
-        } else {
-            slint::CloseRequestResponse::HideWindow
+        let Some(ui) = weak.upgrade() else {
+            return slint::CloseRequestResponse::HideWindow;
+        };
+        // 隐藏不终止任务；只有托盘可用且用户已保存开关时才允许后台驻留。
+        if tray_available && ui.get_close_to_tray_enabled() {
+            return slint::CloseRequestResponse::HideWindow;
         }
+        if !exit_blocked(&ui) {
+            let _ = slint::quit_event_loop();
+        }
+        slint::CloseRequestResponse::KeepWindowShown
     });
+    let tray_timer = slint::Timer::default();
+    if let Ok(tray) = tray {
+        let weak = ui.as_weak();
+        // 定时器拥有托盘，确保其原生资源在事件循环结束后才释放。
+        tray_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            while let Some(action) = tray.poll() {
+                match action {
+                    packporter::infra::tray::TrayAction::Show => {
+                        let _ = show_main_window(&ui);
+                    }
+                    packporter::infra::tray::TrayAction::Quit => {
+                        if exit_blocked(&ui) {
+                            ui.set_status_kind("info".into());
+                            ui.set_status_text("任务正在进行，请完成后再退出。".into());
+                            let _ = show_main_window(&ui);
+                        } else {
+                            let _ = slint::quit_event_loop();
+                        }
+                    }
+                }
+            }
+        });
+    }
     let _launcher_timer = install_launcher_lifecycle(
         ui.as_weak(),
         followed,
@@ -87,11 +166,11 @@ fn main() {
         std::thread::spawn(move || start_watcher(&watcher_root, weak, &state));
     }
 
-    // 无边框窗口镶边（Windows）：原生窗口在事件循环启动并显示后才存在，
-    // 先调度安装，句柄未就绪则以短间隔重试。
-    install_frameless_chrome(ui.as_weak());
-
-    ui.run().expect("UI 事件循环异常退出");
+    // 不调用 ComponentHandle::run，它会无条件显示窗口；静默启动不能先显示再隐藏。
+    if !followed || !tray_available {
+        show_main_window(&ui).expect("UI 显示失败");
+    }
+    slint::run_event_loop_until_quit().expect("UI 事件循环异常退出");
 }
 
 /**
@@ -135,7 +214,7 @@ fn install_launcher_lifecycle(
             if lifecycle.observe(
                 ui.get_launcher_follow_enabled(),
                 count,
-                ui.get_busy() || ui.get_executing() || ui.get_settings_saving() || ui.get_launcher_selecting(),
+                exit_blocked(&ui),
             ) {
                 let _ = slint::quit_event_loop();
             }

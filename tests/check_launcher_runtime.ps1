@@ -2,6 +2,7 @@
 # 测试只写隔离配置，不创建登录启动项，不修改原启动器。
 param([string]$Executable = "$PSScriptRoot/../target/debug/packporter.exe")
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/window_probe.ps1"
 $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $shimPath = Join-Path (Split-Path $exePath) 'packporter-shim.exe'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("packporter-shim-" + [guid]::NewGuid())
@@ -70,6 +71,11 @@ fn main() {
     $firstShim = Start-Shim $launcher @('--fixture-marker', $firstMarker, '中文 空格', 'a"b', 'tail\')
     $first = Wait-Fixture $firstMarker
     Wait-WindowCount 1
+    # shim 唤起只保留托盘，不得创建可见主窗口。
+    Start-Sleep -Seconds 2
+    $followedApp = @(Get-TestWindows)[0]
+    $followedApp.Refresh()
+    if (([TrayRuntimeNative]::MainWindow($followedApp.Id)) -ne 0) { throw 'shim 启动应静默驻留托盘' }
     $lines = Get-Content -LiteralPath $firstMarker
     # Rust 可返回 Windows 扩展路径前缀；去掉前缀后比较实际目录。
     $workingDirectory = $lines[1] -replace '^\\\\\?\\', ''

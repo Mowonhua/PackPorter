@@ -71,15 +71,19 @@ fn run_all_inner() {
     ui.invoke_open_settings();
     assert!(ui.get_settings_open(), "open-settings 应打开设置页");
     assert!(!ui.get_settings_follow_launchers(), "跟随启动器默认关闭");
+    assert!(!ui.get_settings_close_to_tray() && !ui.get_close_to_tray_enabled());
+    ui.set_settings_close_to_tray(true);
     ui.set_settings_follow_launchers(true);
     ui.invoke_cancel_settings();
     assert!(!ui.get_settings_open(), "cancel-settings 应关闭设置页");
     assert!(!AppConfig::load().follow_launchers, "取消不得落盘启动器草稿");
+    assert!(!AppConfig::load().close_to_tray && !ui.get_close_to_tray_enabled(), "取消不得发布托盘草稿");
     assert!(launcher_calls.lock().unwrap().is_empty(), "取消不得修改启动器关联");
 
     // 设置页规则配置弹窗：默认规则装载、新增/编辑/删除与非法输入拒绝。
     ui.invoke_open_settings();
     assert!(!ui.get_saved_rules_dirty(), "打开设置时规则不应标记未保存");
+    assert!(!ui.get_settings_close_to_tray(), "重新打开须恢复已保存的托盘配置");
     ui.invoke_open_rule_dialog(1);
     assert!(ui.get_rule_dialog_visible(), "配置回调应打开规则弹窗");
     assert_eq!(ui.get_rule_dialog_rows().row_count(), 4, "L1 默认应有 4 条路径");
@@ -118,9 +122,11 @@ fn run_all_inner() {
     ui.set_rule_dialog_visible(false);
     // 配置中 versions 目录为空，保存前需填入合法目录（fixture 根）。
     ui.set_settings_versions_dir(versions_root.to_string_lossy().to_string().into());
+    ui.set_settings_close_to_tray(true);
     ui.invoke_save_settings();
     wait_for_settings(&ui);
     assert!(!ui.get_settings_open(), "保存后设置页应关闭");
+    assert!(AppConfig::load().close_to_tray && ui.get_close_to_tray_enabled(), "成功保存须持久化并发布托盘配置");
     let saved_rules = AppConfig::load().rules.expect("保存后配置应包含规则表");
     assert!(
         saved_rules.iter().any(|r| r.relative_path == "persisted/"),
@@ -284,11 +290,15 @@ fn run_all_inner() {
 
     launcher_fail.store(true, std::sync::atomic::Ordering::Relaxed);
     ui.invoke_open_settings();
+    assert!(ui.get_settings_close_to_tray(), "打开须加载已保存的托盘配置");
+    ui.set_settings_close_to_tray(false);
     ui.set_settings_follow_launchers(false);
     ui.invoke_save_settings();
     wait_for_settings(&ui);
     assert!(ui.get_settings_open(), "失败保留设置页和草稿");
     assert!(!ui.get_settings_follow_launchers());
+    assert!(!ui.get_settings_close_to_tray());
+    assert!(AppConfig::load().close_to_tray && ui.get_close_to_tray_enabled(), "关联失败须回滚托盘配置并保持生效值");
     assert!(AppConfig::load().follow_launchers && ui.get_launcher_follow_enabled(), "失败恢复持久化配置且不更新生效状态");
     assert!(ui.get_status_text().contains("模拟启动器恢复失败"));
     assert_eq!(ui.get_launcher_follow_revision(), 1, "失败不发布配置修订");
@@ -296,6 +306,7 @@ fn run_all_inner() {
     ui.invoke_save_settings();
     wait_for_settings(&ui);
     assert!(!AppConfig::load().follow_launchers && !ui.get_launcher_follow_enabled());
+    assert!(!AppConfig::load().close_to_tray && !ui.get_close_to_tray_enabled());
     assert_eq!(ui.get_launcher_follow_revision(), 2);
     assert_eq!(*launcher_calls.lock().unwrap(), vec![(true, vec!["PCL2.exe".to_string()]), (false, vec!["PCL2.exe".to_string()]), (false, vec!["PCL2.exe".to_string()])]);
 
@@ -307,6 +318,7 @@ fn run_all_inner() {
     assert_eq!(launcher_calls.lock().unwrap().len(), 3);
     ui.set_settings_versions_dir("".into());
     // 将配置目录指向普通文件，稳定模拟不可写目录且不依赖机器 ACL。
+    ui.set_settings_close_to_tray(true);
     let blocked_dir = config_dir.join("blocked-directory");
     std::fs::write(&blocked_dir, "blocked").unwrap();
     std::env::set_var("PACKPORTER_CONFIG_DIR", &blocked_dir);
@@ -315,6 +327,8 @@ fn run_all_inner() {
     std::env::set_var("PACKPORTER_CONFIG_DIR", &config_dir);
     assert!(ui.get_settings_open() && ui.get_settings_follow_launchers());
     assert!(!ui.get_launcher_follow_enabled() && !AppConfig::load().follow_launchers);
+    assert!(ui.get_settings_close_to_tray());
+    assert!(!ui.get_close_to_tray_enabled() && !AppConfig::load().close_to_tray, "写入失败不得发布托盘配置");
     assert!(ui.get_status_text().contains("配置文件写入失败"));
     assert_eq!(launcher_calls.lock().unwrap().len(), 3, "写盘失败不得修改启动器关联");
     ui.set_settings_saving(true);

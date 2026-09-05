@@ -7,7 +7,16 @@ use packporter::app_config::AppConfig;
 fn older_config_does_not_enable_launcher_following() {
     let config: AppConfig = serde_json::from_str(r#"{"auto_backup":false}"#).unwrap();
     assert!(!config.follow_launchers);
+    assert!(!config.close_to_tray);
     assert!(!config.auto_backup);
+}
+
+#[test]
+fn close_to_tray_preference_survives_json_roundtrip() {
+    let config: AppConfig = serde_json::from_str(r#"{"close_to_tray":true}"#).unwrap();
+    assert!(config.close_to_tray);
+    let restored: AppConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert!(restored.close_to_tray);
 }
 
 #[test]

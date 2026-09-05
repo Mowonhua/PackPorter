@@ -521,6 +521,9 @@ export component PackPorterWindow inherits Window {
     in-out property <bool> saved-launcher-paths-dirty: false;
     in-out property <bool> settings-follow-launchers: false;
     in-out property <bool> launcher-follow-enabled: false;
+    // 设置页只编辑草稿；窗口生命周期读取成功保存后发布的生效值。
+    in-out property <bool> settings-close-to-tray: false;
+    in-out property <bool> close-to-tray-enabled: false;
     // 每次成功变更递增，供生命周期观察者识别短时间内完成的禁用与重启。
     in-out property <int> launcher-follow-revision: 0;
     // 父页面关闭即清除弹窗目标状态，避免下次进入设置时恢复旧弹窗。
@@ -553,6 +556,7 @@ export component PackPorterWindow inherits Window {
     pure function settings-dirty() -> bool {
         return saved-versions-dir != settings-versions-dir
             || launcher-follow-enabled != settings-follow-launchers
+            || close-to-tray-enabled != settings-close-to-tray
             || saved-launcher-paths-dirty
             || saved-auto-backup != settings-auto-backup
             || saved-include-saves != settings-include-saves
@@ -869,13 +873,27 @@ export component PackPorterWindow inherits Window {
                             }
 
                             Card {
+                                title: "窗口行为";
+                                SettingRow {
+                                    label: "关闭窗口时最小化到托盘";
+                                    checked <=> root.settings-close-to-tray;
+                                }
+                                Text {
+                                    text: "开启后，关闭窗口仍会在托盘中运行；可从托盘菜单打开窗口或退出。";
+                                    color: #6b7280;
+                                    wrap: word-wrap;
+                                    font-size: 12px;
+                                }
+                            }
+
+                            Card {
                                 title: "启动器联动";
                                 SettingRow {
                                     label: "跟随 PCL2 / HMCL 启动与退出";
                                     checked <=> root.settings-follow-launchers;
                                 }
                                 Text {
-                                    text: "原启动器备份为 xxx.bak.exe；保存开启后，原 EXE 和旧快捷方式均可联动。最后一个关联启动器退出后自动关闭。关闭并保存时自动还原原启动器。";
+                                    text: "原启动器备份为 xxx.bak.exe；保存开启后，原 EXE 和旧快捷方式均可联动，并静默启动到托盘。最后一个关联启动器退出后自动关闭。关闭并保存时自动还原原启动器。";
                                     color: #6b7280;
                                     wrap: word-wrap;
                                     font-size: 12px;
