@@ -108,7 +108,7 @@ component SettingRow inherits HorizontalLayout {    in property <string> label;
 
 // 主窗口：单页主流程（选择实例 → 自动出计划 → 执行 → 结果）+ 设置页切换。
 export component PackPorterWindow inherits Window {
-    title: "PackPorter —— 整合包平滑迁移";
+    title: "PackPorter";
     preferred-width: 900px;
     preferred-height: 640px;
     min-width: 760px;
@@ -202,11 +202,6 @@ export component PackPorterWindow inherits Window {
                     text: "PackPorter";
                     font-size: 17px;
                     font-weight: 700;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: "整合包平滑迁移";
-                    color: #9ca3af;
                     vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
