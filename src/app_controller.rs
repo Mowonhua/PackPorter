@@ -457,6 +457,8 @@ fn try_start_scan(ctx: &Arc<ControllerCtx>, ui: &PackPorterWindow) -> bool {
                     ui.set_plan_ready(false);
                     ui.set_lock_warning_visible(false);
                     clear_plan(&ui);
+                    // 恢复选择可能触发计划生成，先结束扫描提示，避免覆盖后续计划状态。
+                    set_status(&ui, "success", &format!("扫描完成，共发现 {count} 个实例。"));
                     // 新列表与旧选中索引必然失配，重置为未选择（占位行）。
                     ui.set_source_index(0);
                     ui.set_target_index(0);
