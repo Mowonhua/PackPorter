@@ -43,6 +43,9 @@ windows-sys = { version = "0.60", features = [
 slint-build = "1"
 winresource = "0.1.31"
 
+[dev-dependencies]
+i-slint-backend-testing = "=1.17.1"
+
 # UI 回调集成测试：以独立程序运行（harness = false），
 # 在主线程持有 Slint 事件循环，直接驱动真实回调并自检退出码。
 [[test]]

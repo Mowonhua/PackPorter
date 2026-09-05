@@ -3528,6 +3528,7 @@ name = "packporter"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "i-slint-backend-testing",
  "notify",
  "raw-window-handle",
  "rfd",

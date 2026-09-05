@@ -1,0 +1,44 @@
+// 文件职责：页面与浮层的显示生命周期及输入隔离。
+// 定义范围：由可见目标驱动的动画进度、挂载状态与内容容器。
+
+// shown 是调用方的目标状态；present 在退出动画结束前保持为 true。
+// 调用方必须将容器绝对定位，避免同时挂载的页面互相挤占布局。
+export component AnimatedLayer inherits Rectangle {
+    in property <bool> shown;
+    in property <bool> interactive: true;
+    in property <length> offset-x: 0px;
+    in property <length> offset-y: 0px;
+    out property <float> progress: shown ? 1 : 0;
+    out property <bool> present: shown || progress > 0;
+    animate progress { duration: 180ms; easing: ease-out; }
+
+    // 调用方用 present 条件挂载内容：Slint 不允许 @children 位于条件元素中。
+    // 反向切换直接从当前进度继续，无延迟任务竞态。
+    visible: present;
+    FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        // opacity 不影响输入命中；捕获阶段拦截退场或模态背景中的键盘事件。
+        capture-key-pressed(event) => {
+            return !root.shown || !root.interactive ? accept : reject;
+        }
+        capture-key-released(event) => {
+            return !root.shown || !root.interactive ? accept : reject;
+        }
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            x: root.offset-x * (1 - root.progress);
+            y: root.offset-y * (1 - root.progress);
+            opacity: root.progress;
+            @children
+        }
+        // 退场时遮挡鼠标与滚轮，直到子树移除，避免点到仍然可见的旧控件。
+        TouchArea {
+            enabled: !root.shown || !root.interactive;
+            scroll-event(event) => { return accept; }
+        }
+    }
+}
