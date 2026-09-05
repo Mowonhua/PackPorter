@@ -282,6 +282,8 @@ export component PackPorterWindow inherits Window {
             HorizontalLayout {
                 padding-left: 20px;
                 spacing: 8px;
+                // 布局默认 stretch 会把齿轮摊到行尾与窗口按钮重叠，需显式靠左排布。
+                alignment: start;
                 Text {
                     text: "PackPorter";
                     font-size: 17px;
