@@ -46,7 +46,7 @@ fn main() {
     if let (Some(old), Some(new)) = (old, new) {
         println!("\n== L4 options 合并预览: {} -> {} ==", old.version.dir_name, new.version.dir_name);
         let migration = MigrationService::new(versions_root);
-        match migration.plan_migration(&old, &new) {
+        match migration.plan_migration(&old, &new, packporter::domain::instance::MigrationOptions::all_enabled()) {
             Ok(plan) => {
                 for entry in &plan.entries {
                     println!(

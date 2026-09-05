@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::domain::instance::MigrationOptions;
+
 // ==================== 常量、枚举和类型别名 ====================
 
 /// 配置文件名，存放于用户配置目录的 packporter 子目录下。
@@ -62,12 +64,32 @@ impl Default for AppConfig {
 
 impl AppConfig {
     /**
+     * 函数职责：将持久化的布尔开关映射为迁移选项。
+     * 输入说明：无。
+     * 输出说明：与配置字段一一对应的 MigrationOptions。
+     * 实现思路：逐字段拷贝。
+     */
+    pub fn migration_options(&self) -> MigrationOptions {
+        MigrationOptions {
+            auto_backup: self.auto_backup,
+            include_saves: self.include_saves,
+            include_packs: self.include_packs,
+            include_moddata: self.include_moddata,
+            include_options: self.include_options,
+        }
+    }
+
+    /**
      * 函数职责：确定配置文件绝对路径。
      * 输入说明：无。
      * 输出说明：<用户配置目录>/packporter/config.json；无法定位用户目录时返回 None。
-     * 实现思路：优先 AppData（Windows），回退 USER_PROFILE。
+     * 实现思路：优先 PACKPORTER_CONFIG_DIR（测试隔离用），其次 AppData（Windows），
+     *           回退 USER_PROFILE。
      */
     pub fn config_path() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("PACKPORTER_CONFIG_DIR") {
+            return Some(PathBuf::from(dir).join(CONFIG_FILE_NAME));
+        }
         let base = std::env::var("APPDATA").ok().or_else(|| std::env::var("USER_PROFILE").ok())?;
         Some(PathBuf::from(base).join("packporter").join(CONFIG_FILE_NAME))
     }

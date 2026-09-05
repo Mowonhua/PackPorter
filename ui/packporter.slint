@@ -1,10 +1,12 @@
 /**
  * 文件职责：主窗口 UI：布局、控件树与交互接线。
- * 定义范围：组件结构、属性声明、控件事件与回调的绑定关系、计划明细行组件；
+ * 定义范围：组件结构、属性声明、控件事件与回调的绑定关系、计划明细行组件与设置页；
  *           交互的业务逻辑全部由 Rust 侧回调实现，UI 不承载迁移规则。
+ * 交互约定：控件可用性由状态属性驱动（plan-ready / busy 等），无效操作被禁用而非报错；
+ *           反馈走单行状态栏（status-text，逐次覆盖），不再保留追加式日志。
  */
 
-import { Button, ComboBox, ListView } from "std-widgets.slint";
+import { Button, ComboBox, ListView, LineEdit, ProgressIndicator, Spinner, Switch } from "std-widgets.slint";
 
 // 计划预览列表的单行数据，由 Rust 侧从迁移计划构建。
 export struct PlanEntryView {
@@ -16,129 +18,422 @@ export struct PlanEntryView {
     action-label: string,
     /// 条目内文件或键位数量（含单位，Rust 侧格式化）。
     item-count: string,
+    /// 无动作条目（源目录缺失等）：整行淡化并排在列表末尾。
+    dimmed: bool,
 }
 
 // 计划明细行：固定高度，供 ListView 逐条渲染。
 component PlanRow inherits Rectangle {
     in property <PlanEntryView> entry;
-    height: 30px;
+    height: 32px;
     HorizontalLayout {
         padding-left: 8px;
         padding-right: 8px;
         spacing: 8px;
-        Text { text: entry.level-label; min-width: 110px; vertical-alignment: center; }
+        Text { text: entry.level-label; min-width: 110px; color: #9ca3af; vertical-alignment: center; }
         Text {
             text: entry.path;
             horizontal-stretch: 1;
             vertical-alignment: center;
             overflow: elide;
+            color: entry.dimmed ? #c4c8cf : #1f2937;
         }
-        Text { text: entry.item-count; min-width: 70px; horizontal-alignment: right; vertical-alignment: center; }
-        Text { text: entry.action-label; min-width: 170px; vertical-alignment: center; }
+        Text { text: entry.item-count; min-width: 70px; horizontal-alignment: right; color: entry.dimmed ? #c4c8cf : #374151; vertical-alignment: center; }
+        Text { text: entry.action-label; min-width: 200px; color: entry.dimmed ? #c4c8cf : #374151; vertical-alignment: center; }
     }
 }
 
-// 主窗口：向导式布局（选择实例 → 计划预览 → 执行进度 → 完成）。
+// 卡片容器：白底圆角 + 可选标题，作为主页面各分区的统一外壳。
+component Card inherits Rectangle {
+    in property <string> title;
+    border-radius: 8px;
+    background: white;
+    border-width: 1px;
+    border-color: #e4e7ec;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        if root.title != "": Text {
+            text: root.title;
+            font-weight: 700;
+            color: #374151;
+        }
+        @children
+    }
+}
+
+// 齿轮图标按钮：无边框、无背景，悬停/按下仅加深图标颜色。
+// 高度跟随容器（头部整行），图标在按钮内水平垂直居中。
+component GearButton inherits Rectangle {
+    callback clicked();
+    in property <bool> enabled: true;
+    width: 38px;
+    background: transparent;
+    opacity: root.enabled ? 1.0 : 0.4;
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+    Path {
+        width: 26px;
+        height: 26px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z";
+        fill: touch.pressed ? #1f2937 : touch.has-hover ? #374151 : #6b7280;
+    }
+    accessible-role: button;
+    accessible-label: "设置";
+    accessible-action-default => { root.clicked(); }
+}
+
+// 设置页的单行开关：开关 + 主标题 + 一句说明。
+component SettingRow inherits HorizontalLayout {    in property <string> label;
+    in property <string> description;
+    in-out property <bool> checked;
+    spacing: 10px;
+    Switch {
+        y: 2px;
+        checked <=> root.checked;
+    }
+    VerticalLayout {
+        spacing: 1px;
+        Text { text: root.label; font-weight: 600; color: #1f2937; vertical-alignment: center; }
+        Text { text: root.description; font-size: 11px; color: #6b7280; wrap: word-wrap; vertical-alignment: center; }
+    }
+}
+
+// 主窗口：单页主流程（选择实例 → 自动出计划 → 执行 → 结果）+ 设置页切换。
 export component PackPorterWindow inherits Window {
     title: "PackPorter —— 整合包平滑迁移";
     preferred-width: 900px;
     preferred-height: 640px;
+    min-width: 760px;
+    min-height: 520px;
+    background: #f3f4f6;
 
     // ==================== 属性声明 ====================
 
+    // ---- 实例与计划（主流程） ----
     // 实例列表条目（目录名展示），由服务层扫描后填充。
     in-out property <[string]> instance-names: [];
     // 源实例在下拉框中的索引；-1 表示未选择。
     in-out property <int> source-index: -1;
     // 目标实例在下拉框中的索引；-1 表示未选择。
     in-out property <int> target-index: -1;
-    // 计划摘要文案（源/目标、规则数与备份目录）。
+    // 计划摘要文案（源/目标、规则数与跳过项）。
     in-out property <string> plan-summary: "";
     // 计划预览明细行（每条资产规则一行）。
     in-out property <[PlanEntryView]> plan-entries: [];
+    // 当前是否已有一份可用计划（驱动执行/备份按钮可用性）。
+    in-out property <bool> plan-ready: false;
+    // 占用警告是否可见（阻断迁移）。
+    in-out property <bool> lock-warning-visible: false;
+    // 是否已配置 versions 目录（未配置时禁用扫描，避免可点即报错）。
+    in-out property <bool> has-versions-dir: false;
+
+    // ---- 忙碌与进度 ----
+    // 扫描/计划生成等后台计算进行中（按钮禁用 + 菊花提示）。
+    in-out property <bool> busy: false;
+    // 迁移事务执行中（显示进度卡片）。
+    in-out property <bool> executing: false;
     // 进度百分比 0-100；-1 表示不确定态。
     in-out property <int> progress-percent: -1;
     // 进度区域当前动作描述。
     in-out property <string> progress-text: "";
-    // 日志区内容（追加式）。
-    in-out property <string> log-text: "";
-    // 占用警告是否可见（阻断迁移）。
-    in-out property <bool> lock-warning-visible: false;
+
+    // ---- 单行状态栏（覆盖式反馈：操作结果、错误与提示都在这里，逐次覆盖） ----
+    // 最新一条反馈文案。
+    in-out property <string> status-text: "";
+    // 状态种类："info" / "success" / "error"，决定文字颜色。
+    in-out property <string> status-kind: "info";
+
+    // ---- 设置页 ----
+    in-out property <bool> settings-open: false;
+    in-out property <string> settings-versions-dir: "";
+    in-out property <bool> settings-auto-backup: true;
+    in-out property <bool> settings-include-saves: true;
+    in-out property <bool> settings-include-packs: true;
+    in-out property <bool> settings-include-moddata: true;
+    in-out property <bool> settings-include-options: true;
+
+    // 状态栏颜色：错误红、成功绿、普通灰。
+    pure function status-color() -> color {
+        return self.status-kind == "error" ? #b91c1c
+            : self.status-kind == "success" ? #15803d
+            : #6b7280;
+    }
 
     // ==================== 回调声明 ====================
 
     // 请求扫描 versions/ 实例列表。
     callback scan-requested();
-    // 请求生成迁移计划（源/目标选定后）。
+    // 请求（重新）生成迁移计划；源/目标变化时由 changed 回调自动触发。
     callback plan-requested();
     // 请求执行迁移（用户在预览页确认后）。
     callback execute-requested();
     // 请求打开备份目录。
     callback open-backup-folder();
+    // 设置页：进入 / 取消 / 保存 / 浏览目录。
+    callback open-settings();
+    callback cancel-settings();
+    callback save-settings();
+    callback browse-versions-dir();
 
-    // ==================== 布局与交互接线 ====================
+    // 选择变化即自动生成计划；合法性（是否已扫描、索引是否有效、是否忙碌）由 Rust 侧守卫。
+    changed source-index => { root.plan-requested(); }
+    changed target-index => { root.plan-requested(); }
+
+    // ==================== 顶栏 ====================
 
     VerticalLayout {
-        padding: 16px;
-        spacing: 12px;
-
-        // 顶部：源/目标实例选择与扫描、计划按钮。
-        HorizontalLayout {
-            spacing: 8px;
-            Text { text: "源实例:"; vertical-alignment: center; }
-            ComboBox {
-                min-width: 220px;
-                // 模型由扫描回调填充；选中索引双向同步，保证 UI 选中与 Rust 状态一致。
-                model: root.instance-names;
-                current-index <=> root.source-index;
-            }
-            Text { text: "目标实例:"; vertical-alignment: center; }
-            ComboBox {
-                min-width: 220px;
-                model: root.instance-names;
-                current-index <=> root.target-index;
-            }
-            Button { text: "扫描实例"; clicked => { root.scan-requested(); } }
-            Button { text: "生成迁移计划"; clicked => { root.plan-requested(); } }
-        }
-
-        // 计划预览区：摘要 + 各规则决策明细。
+        // 顶栏：标题 + 设置入口。
         Rectangle {
-            border-width: 1px;
-            border-color: #d0d0d0;
-            border-radius: 6px;
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: 8px;
-                spacing: 4px;
-                Text { text: root.plan-summary; wrap: word-wrap; }
-                ListView {
+            height: 52px;
+            background: white;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 12px;
+                spacing: 8px;
+                Text {
+                    text: "PackPorter";
+                    font-size: 17px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "整合包平滑迁移";
+                    color: #9ca3af;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                GearButton {
+                    enabled: !root.busy;
+                    clicked => { root.open-settings(); }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: #e4e7ec; }
+
+        // ==================== 页面容器（条件实例化：未显示的页面不参与布局） ====================
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            // ==================== 主流程页 ====================
+            if !root.settings-open: VerticalLayout {
+                spacing: 10px;
+
+                // 第一步：选择实例。
+                Card {
+                    title: "选择实例";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "源实例"; vertical-alignment: center; color: #374151; }
+                        ComboBox {
+                            min-width: 200px;
+                            // 模型由扫描回调填充；选中索引双向同步，保证 UI 选中与 Rust 状态一致。
+                            model: root.instance-names;
+                            current-index <=> root.source-index;
+                            enabled: root.instance-names.length > 0 && !root.busy;
+                        }
+                        Text { text: "目标实例"; vertical-alignment: center; color: #374151; }
+                        ComboBox {
+                            min-width: 200px;
+                            model: root.instance-names;
+                            current-index <=> root.target-index;
+                            enabled: root.instance-names.length > 0 && !root.busy;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Spinner {
+                            visible: root.busy;
+                            width: 24px;
+                            height: 24px;
+                            indeterminate: true;
+                        }
+                        Button {
+                            text: root.instance-names.length > 0 ? "重新扫描" : "扫描实例";
+                            enabled: root.has-versions-dir && !root.busy;
+                            clicked => { root.scan-requested(); }
+                        }
+                    }
+                    if root.lock-warning-visible: Text {
+                        text: "检测到实例正被运行中的游戏进程占用，迁移已被阻断。请关闭对应游戏后重试。";
+                        color: #b91c1c;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // 第二步：计划预览（选满源与目标后自动生成，支持手动重新生成）。
+                Card {
+                    title: "迁移计划";
                     vertical-stretch: 1;
-                    for e in root.plan-entries: PlanRow {
-                        entry: e;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: root.plan-summary;
+                            color: #374151;
+                            wrap: word-wrap;
+                            visible: root.plan-ready;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "重新生成";
+                            enabled: root.source-index > 0 && root.target-index > 0 && !root.busy && !root.executing;
+                            clicked => { root.plan-requested(); }
+                        }
+                    }
+                    if !root.plan-ready && !root.busy: Text {
+                        text: "在上方选择源实例与目标实例，会自动生成迁移计划。";
+                        color: #9ca3af;
+                        vertical-alignment: center;
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        visible: root.plan-ready;
+                        for e in root.plan-entries: PlanRow {
+                            entry: e;
+                        }
+                    }
+                }
+
+                // 执行进度卡片（仅执行期间出现）。
+                if root.executing: Card {
+                    HorizontalLayout {
+                        spacing: 12px;
+                        ProgressIndicator {
+                            progress: root.progress-percent * 1.0 / 100.0;
+                            indeterminate: root.progress-percent < 0;
+                            min-width: 220px;
+                        }
+                        Text {
+                            text: root.progress-percent >= 0 ? "\{root.progress-percent}%" : "";
+                            min-width: 52px;
+                            vertical-alignment: center;
+                            color: #374151;
+                        }
+                    }
+                    Text {
+                        text: root.progress-text;
+                        color: #6b7280;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+
+                // 底部操作条。
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "开始迁移";
+                        primary: true;
+                        enabled: root.plan-ready && !root.busy && !root.executing;
+                        clicked => { root.execute-requested(); }
+                    }
+                    Button {
+                        text: "打开备份目录";
+                        enabled: root.plan-ready && !root.busy && !root.executing;
+                        clicked => { root.open-backup-folder(); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+
+            // ==================== 设置页 ====================
+            if root.settings-open: VerticalLayout {
+                spacing: 10px;
+
+                Card {
+                    title: "Minecraft 目录";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            text <=> root.settings-versions-dir;
+                            placeholder-text: "例如 D:\\Minecraft\\.minecraft\\versions";
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "浏览…";
+                            clicked => { root.browse-versions-dir(); }
+                        }
+                    }
+                    Text {
+                        text: "指向 .minecraft 下的 versions 目录；修改并保存后会自动重新扫描实例。";
+                        font-size: 11px;
+                        color: #6b7280;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Card {
+                    title: "迁移内容";
+                    VerticalLayout {
+                        spacing: 12px;
+                        SettingRow {
+                            label: "迁移前自动备份";
+                            description: "覆盖目标实例同名文件前，先把目标现状打包为 Zip 备份。";
+                            checked <=> root.settings-auto-backup;
+                        }
+                        SettingRow {
+                            label: "存档与个人资产（L1）";
+                            description: "saves、servers.dat、screenshots、schematics，直接复制。";
+                            checked <=> root.settings-include-saves;
+                        }
+                        SettingRow {
+                            label: "资源包与光影包（L2）";
+                            description: "resourcepacks、shaderpacks，增量合并：旧有新缺才复制。";
+                            checked <=> root.settings-include-packs;
+                        }
+                        SettingRow {
+                            label: "地图与模组数据（L3）";
+                            description: "Xaero、JourneyMap 等辅助模组的个人数据，直接复制。";
+                            checked <=> root.settings-include-moddata;
+                        }
+                        SettingRow {
+                            label: "客户端偏好（L4）";
+                            description: "options.txt 按白名单键位智能合并，不整文件覆盖。";
+                            checked <=> root.settings-include-options;
+                        }
+                    }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "取消";
+                        clicked => { root.cancel-settings(); }
+                    }
+                    Button {
+                        text: "保存";
+                        primary: true;
+                        clicked => { root.save-settings(); }
                     }
                 }
             }
         }
 
-        // 进度与日志区（含实例占用警告）。
-        VerticalLayout {
-            spacing: 4px;
-            Text {
-                text: "检测到实例正被运行中的游戏进程占用，迁移已被阻断。请关闭对应游戏后重试。";
-                color: #b91c1c;
-                visible: root.lock-warning-visible;
-                wrap: word-wrap;
+        // ==================== 常驻状态栏（覆盖式单行反馈，两个页面共享） ====================
+        Rectangle { height: 1px; background: #e4e7ec; }
+        Rectangle {
+            height: 30px;
+            background: white;
+            HorizontalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                Text {
+                    text: root.status-text;
+                    color: root.status-color();
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
-            Text { text: root.progress-text; }
-            Text { text: root.log-text; wrap: word-wrap; }
-        }
-
-        // 底部操作条。
-        HorizontalLayout {
-            spacing: 8px;
-            Button { text: "开始迁移"; clicked => { root.execute-requested(); } }
-            Button { text: "打开备份目录"; clicked => { root.open-backup-folder(); } }
         }
     }
 }

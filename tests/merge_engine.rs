@@ -324,7 +324,9 @@ fn plan_and_execute_end_to_end_migrates_assets() {
     let source = instances.iter().find(|p| p.version.dir_name == "Old 1.0").unwrap();
     let target = instances.iter().find(|p| p.version.dir_name == "New 1.0").unwrap();
 
-    let plan = service.plan_migration(source, target).unwrap();
+    let plan = service
+        .plan_migration(source, target, packporter::domain::instance::MigrationOptions::all_enabled())
+        .unwrap();
     // L1 存档复制、L2 同名保留新版、L3 地图复制、L4 合并明细存在。
     let saves_entry = plan.entries.iter().find(|e| e.rule.relative_path == "saves/").unwrap();
     assert!(saves_entry.decisions.iter().any(|d| d.relative_path == "saves/world/level.dat"));
@@ -385,10 +387,85 @@ fn execute_plan_rejects_unconfirmed() {
         entries: Vec::new(),
         backup_dir: std::path::PathBuf::from("/tmp/backups"),
         options_result: None,
+        options: packporter::domain::instance::MigrationOptions::all_enabled(),
     };
     let _ = &a;
     let result = service.execute_plan(&plan, false, &mut |_| {});
     assert!(matches!(result, Err(packporter::domain::error::PackError::InvalidPlan(_))));
+}
+
+#[test]
+fn plan_options_exclude_disabled_levels_and_skip_backup() {
+    use packporter::domain::instance::{DecisionAction, MigrationOptions};
+    use packporter::services::migration_service::MigrationService;
+
+    let base = std::env::temp_dir().join("packporter_test_options");
+    let _ = std::fs::remove_dir_all(&base);
+    let versions = base.join("versions");
+    let old = versions.join("Old");
+    let new = versions.join("New");
+    std::fs::create_dir_all(old.join("saves")).unwrap();
+    std::fs::create_dir_all(old.join("resourcepacks")).unwrap();
+    std::fs::create_dir_all(new.join("saves")).unwrap();
+    std::fs::create_dir_all(new.join("resourcepacks")).unwrap();
+    std::fs::write(old.join("saves/level.dat"), "level").unwrap();
+    std::fs::write(old.join("resourcepacks/pack.zip"), "pack").unwrap();
+    std::fs::write(new.join("saves/level.dat"), "new-level").unwrap();
+    std::fs::write(old.join("options.txt"), "fov:0.85\n").unwrap();
+    std::fs::write(new.join("options.txt"), "fov:0.6\n").unwrap();
+
+    let service = MigrationService::new(versions.clone());
+    let instances = service.instances.scan_instances().unwrap();
+    let source = instances.iter().find(|p| p.version.dir_name == "Old").unwrap();
+    let target = instances.iter().find(|p| p.version.dir_name == "New").unwrap();
+
+    // 关闭 L1/L2/L4：计划只应包含 L3 及以下条目（此处为空），options 明细为 None。
+    let mut options = MigrationOptions::all_enabled();
+    options.include_saves = false;
+    options.include_packs = false;
+    options.include_options = false;
+    let plan = service.plan_migration(source, target, options).unwrap();
+    assert!(
+        !plan.entries.iter().any(|e| e.rule.relative_path == "saves/"),
+        "关闭 L1 后计划不应包含存档条目"
+    );
+    assert!(
+        !plan.entries.iter().any(|e| e.rule.relative_path == "resourcepacks/"),
+        "关闭 L2 后计划不应包含资源包条目"
+    );
+    assert!(plan.options_result.is_none(), "关闭 L4 后计划不应携带合并明细");
+
+    // 执行：auto_backup=false 时即使存在覆盖也不生成备份 zip。
+    let outcome = service.execute_plan(&plan, true, &mut |_| {}).unwrap();
+    assert!(outcome.success);
+    assert_eq!(
+        std::fs::read_to_string(new.join("options.txt")).unwrap(),
+        "fov:0.6\n",
+        "关闭 L4 后目标 options 应保持原样"
+    );
+    assert!(
+        !new.join("backups").exists(),
+        "关闭自动备份后不应创建备份目录"
+    );
+
+    // 反向对照：同名覆盖在开启备份时目标内容被旧版替换（L1 语义复核）。
+    let mut options_on = MigrationOptions::all_enabled();
+    options_on.include_packs = false;
+    options_on.include_options = false;
+    let plan_on = service.plan_migration(source, target, options_on).unwrap();
+    assert!(plan_on
+        .entries
+        .iter()
+        .flat_map(|e| e.decisions.iter())
+        .any(|d| d.action == DecisionAction::CopyFromOld));
+    service.execute_plan(&plan_on, true, &mut |_| {}).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(new.join("saves/level.dat")).unwrap(),
+        "level",
+        "开启 L1 后同名存档应被旧版覆盖"
+    );
+    assert!(new.join("backups").is_dir(), "开启自动备份后应创建备份目录");
+    std::fs::remove_dir_all(&base).ok();
 }
 
 #[test]

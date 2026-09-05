@@ -146,13 +146,68 @@ pub struct AssetPlanEntry {
 }
 
 /**
+ * 结构职责：用户可选的迁移范围开关，决定规划器纳入哪些资产级别、执行器是否备份。
+ * 字段说明：布尔开关缺省均为开启（保守迁移）；由设置界面编辑并随计划持久化。
+ * 约束条件：计划生成时快照进 MigrationPlan，执行器只读计划中的副本，不回读实时配置。
+ */
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MigrationOptions {
+    /// 是否在迁移前自动创建 Zip 备份。
+    pub auto_backup: bool,
+    /// 是否迁移 L1 存档等安全私有资产。
+    pub include_saves: bool,
+    /// 是否迁移 L2 资源包/光影包。
+    pub include_packs: bool,
+    /// 是否迁移 L3 地图与辅助模组数据。
+    pub include_moddata: bool,
+    /// 是否执行 L4 options 智能合并。
+    pub include_options: bool,
+}
+
+impl MigrationOptions {
+    /**
+     * 函数职责：提供全开配置（Default 派生布尔为 false，故显式实现）。
+     * 输入说明：无。
+     * 输出说明：全部开关开启的选项。
+     * 实现思路：逐字段赋 true。
+     */
+    pub fn all_enabled() -> Self {
+        Self {
+            auto_backup: true,
+            include_saves: true,
+            include_packs: true,
+            include_moddata: true,
+            include_options: true,
+        }
+    }
+
+    /**
+     * 函数职责：判断指定资产级别当前是否纳入迁移。
+     * 输入说明：level 为资产分级。
+     * 输出说明：级别被关闭时返回 false，其余返回 true。
+     * 实现思路：级别到开关字段的映射。
+     */
+    pub fn allows(self, level: AssetLevel) -> bool {
+        match level {
+            AssetLevel::Direct => self.include_saves,
+            AssetLevel::Incremental => self.include_packs,
+            AssetLevel::ModData => self.include_moddata,
+            AssetLevel::SmartMerge => self.include_options,
+        }
+    }
+}
+
+/**
  * 结构职责：完整迁移计划，由规划器产出、确认页消费、执行器消费。
  * 字段说明：backup_dir 在计划阶段即确定命名，但目录在执行阶段才创建；
- *           options_result 承载 L4 的逐键合并明细。
+ *           options_result 承载 L4 的逐键合并明细；options 为计划时快照的迁移选项。
  * 约束条件：entries 的相对路径互不重叠；source 与 target 实例目录不得相同。
  */
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationPlan {
+    /// 计划生成时快照的迁移选项，执行器据此决定备份行为。
+    #[serde(default = "crate::domain::instance::MigrationOptions::all_enabled")]
+    pub options: MigrationOptions,
     /// 源实例（旧版本）。
     pub source: InstanceProfile,
     /// 目标实例（新版本）。
@@ -193,7 +248,7 @@ pub struct TransactionOutcome {
     pub rolled_back: bool,
     /// 成功应用（或已回滚）的动作数。
     pub moved_items: usize,
-    /// 供日志区展示的人类可读报告。
+    /// 供状态栏展示的人类可读单行报告。
     pub report: String,
 }
 

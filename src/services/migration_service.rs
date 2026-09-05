@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::domain::error::{PackError, PackResult};
 use crate::domain::instance::{
     AssetLevel, AssetPlanEntry, AssetRule, DecisionAction, InstanceProfile, MergeDecision,
-    MigrationPlan, MigrationProgress, TransactionOutcome,
+    MigrationOptions, MigrationPlan, MigrationProgress, TransactionOutcome,
 };
 use crate::domain::rules::{built_in_rules, RuleRegistry};
 use crate::domain::transaction::{MigrationTransaction, TransactionAction};
@@ -60,15 +60,16 @@ impl MigrationService {
 
     /**
      * 函数职责：对比源/目标实例，产出完整迁移计划（不写入任何文件）。
-     * 输入说明：source 与 target 为两份实例画像；L4 合并明细随计划返回。
-     * 输出说明：完整计划；源与目标同目录时返回 InvalidPlan。
-     * 实现思路：遍历规则表 → 复制型规则按级别扫描源目录（L2 差集过滤）→
-     *           L4 预合并 options → 汇总条目与备份目录命名。
+     * 输入说明：source 与 target 为两份实例画像；options 为本次迁移的范围开关。
+     * 输出说明：完整计划（携带选项快照）；源与目标同目录时返回 InvalidPlan。
+     * 实现思路：遍历规则表并按选项过滤关闭的级别 → 复制型规则按级别扫描源目录
+     *           （L2 差集过滤）→ L4 预合并 options → 汇总条目与备份目录命名。
      */
     pub fn plan_migration(
         &self,
         source: &InstanceProfile,
         target: &InstanceProfile,
+        options: MigrationOptions,
     ) -> PackResult<MigrationPlan> {
         // 源与目标相同没有迁移意义，直接拒绝。
         if source.root_dir == target.root_dir {
@@ -78,6 +79,10 @@ impl MigrationService {
         }
         let mut entries = Vec::new();
         for rule in &self.rules.entries {
+            // 选项关闭的级别整级跳过，不产生条目。
+            if !options.allows(rule.level) {
+                continue;
+            }
             let entry = match rule.level {
                 AssetLevel::SmartMerge => self.plan_options_entry(rule, source, target),
                 _ => self.plan_copy_entry(rule, source, target),
@@ -85,19 +90,23 @@ impl MigrationService {
             entries.push(entry);
         }
 
-        // L4 合并：目标缺失 options.txt 时以"旧值初始化新版"处理。
-        let options_result = self
-            .merge_engine
-            .merge_options(
-                &source.root_dir.join("options.txt"),
-                &target.root_dir.join("options.txt"),
-            )
-            .ok();
+        // L4 合并：目标缺失 options.txt 时以"旧值初始化新版"处理；L4 关闭时不合并。
+        let options_result = if options.include_options {
+            self.merge_engine
+                .merge_options(
+                    &source.root_dir.join("options.txt"),
+                    &target.root_dir.join("options.txt"),
+                )
+                .ok()
+        } else {
+            None
+        };
 
         // 备份目录：目标实例 backups/ 下按时间戳命名的子目录集合的根。
         let backup_dir = target.root_dir.join("backups");
 
         Ok(MigrationPlan {
+            options,
             source: source.clone(),
             target: target.clone(),
             entries,
@@ -108,9 +117,10 @@ impl MigrationService {
 
     /**
      * 函数职责：执行迁移计划：备份 → 事务执行 → 返回结果。
-     * 输入说明：plan 为 plan_migration 产物；confirmed 必须为 true，显式表达用户已确认。
+     * 输入说明：plan 为 plan_migration 产物；confirmed 必须为 true，显式表达用户已确认；
+     *           是否备份由 plan.options.auto_backup 决定（计划阶段快照，执行期不回读配置）。
      * 输出说明：事务结果；用户未确认时返回 InvalidPlan；事务失败已自动回滚并返回 RolledBack。
-     * 实现思路：校验确认标记 → 以 plan.backup_dir 构造事务引擎 → backup_before →
+     * 实现思路：校验确认标记 → 以 plan.backup_dir 构造事务引擎 → 可选 backup_before →
      *           to_actions → transaction.execute → 汇总报告（含 L4 摘要）。
      */
     pub fn execute_plan(
@@ -125,26 +135,27 @@ impl MigrationService {
         }
         // 以计划中的目标实例重新绑定事务引擎（备份根随之确定）。
         let engine = BackupEngine::for_instance(plan.target.root_dir.clone());
-        // 先做增量 Zip 备份（无可备份文件时返回空路径）。
-        let _backup_zip = engine.backup_before(plan, progress)?;
+        // 按计划快照的选项执行增量 Zip 备份（关闭或无可备份文件时跳过/返回空路径）。
+        if plan.options.auto_backup {
+            let _backup_zip = engine.backup_before(plan, progress)?;
+        }
         // 计划展开为逐文件动作清单并进入事务执行。
         let actions = self.to_actions(plan);
         let applied = engine.execute(&actions, progress)?;
 
-        // 汇总面向用户的报告。
-        let options_summary = plan
-            .options_result
-            .as_ref()
-            .map(|r| crate::services::options_merge::summarize(&r.outcomes))
-            .unwrap_or_else(|| "无".to_string());
+        // 汇总面向用户的单行成功报告：只报复制文件数与合并键位数，保持极简。
+        let copied = plan
+            .entries
+            .iter()
+            .flat_map(|entry| entry.decisions.iter())
+            .filter(|d| d.action == DecisionAction::CopyFromOld)
+            .count();
+        let merged_keys = plan.options_result.as_ref().map(|r| r.merged.len()).unwrap_or(0);
         Ok(TransactionOutcome {
             success: true,
             rolled_back: false,
             moved_items: applied,
-            report: format!(
-                "迁移完成：文件动作 {applied} 项；options 合并：{options_summary}；备份目录 {}",
-                plan.backup_dir.display()
-            ),
+            report: format!("共复制{copied}项，合并键位{merged_keys}项"),
         })
     }
 
