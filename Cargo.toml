@@ -1,6 +1,6 @@
 [package]
 name = "packporter"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 default-run = "packporter"
 description = "Minecraft 整合包平滑迁移工具：将旧版本实例的个人资产安全迁移到新版本实例"

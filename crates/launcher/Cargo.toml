@@ -1,6 +1,6 @@
 [package]
 name = "packporter-launcher"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 description = "PackPorter 启动器绑定、进程会话与独立 shim"
 

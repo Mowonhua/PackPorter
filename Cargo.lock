@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "packporter"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "chrono",
  "i-slint-backend-testing",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "packporter-launcher"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 dependencies = [
  "serde",
  "serde_json",

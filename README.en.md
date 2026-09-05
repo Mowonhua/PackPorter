@@ -30,7 +30,7 @@ When upgrading a modpack, you want to keep your progress while respecting the ne
 
 ## Getting started
 
-Download the Windows x64 archive from [Releases](https://github.com/Mowonhua/PackPorter/releases), extract it, and run `packporter.exe`. The first version, `v0.1.0-alpha.1`, is a prerelease. A SHA-256 checksum file is included on the release page.
+Download the Windows x64 archive from [Releases](https://github.com/Mowonhua/PackPorter/releases), extract all files, and run `packporter.exe`. Keep `packporter-shim.exe` in the same directory. The current version, `v0.1.0-alpha.2`, is a prerelease. A SHA-256 checksum file is included on the release page.
 
 To build from source, the instructions below target **Windows** and require Rust/Cargo, a linker for your Rust toolchain, and Windows resource compilation tools.
 
@@ -53,7 +53,7 @@ To build a standalone executable:
 cargo build --release
 ```
 
-The Windows executable is `target/release/packporter.exe`. The application icon is embedded, so no separate image files need to be distributed.
+The Windows executables are `target/release/packporter.exe` and `target/release/packporter-shim.exe`; distribute them in the same directory. Both have embedded icons, so no separate image files need to be distributed.
 
 Select **关联启动器…** in Settings, choose a PCL2/HMCL executable, enable following, and save. Selection remains a draft until saved. Installation preserves the original as `xxx.bak.exe` in the same directory and places the shim at `xxx.exe`, so existing shortcuts, direct double-clicks, and command lines activate following. Multiple launchers are supported; PackPorter closes after the last linked launcher exits, waiting for migration and settings saves.
 

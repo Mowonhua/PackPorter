@@ -30,7 +30,7 @@
 
 ## 开始使用
 
-从 [Releases](https://github.com/Mowonhua/PackPorter/releases) 下载 Windows x64 压缩包，解压后运行 `packporter.exe`。首版 `v0.1.0-alpha.1` 为预发布版本；下载页附有 SHA-256 校验文件。
+从 [Releases](https://github.com/Mowonhua/PackPorter/releases) 下载 Windows x64 压缩包，完整解压后运行 `packporter.exe`，将 `packporter-shim.exe` 保留在同一目录。当前版本 `v0.1.0-alpha.2` 为预发布版本；下载页附有 SHA-256 校验文件。
 
 也可从源码构建运行。以下以 **Windows** 为例，需要 Rust/Cargo，以及对应工具链的链接器和 Windows 资源编译工具。
 
