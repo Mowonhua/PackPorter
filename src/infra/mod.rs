@@ -9,5 +9,8 @@ pub mod key_value;
 pub mod process_probe;
 /// Zip 镜像备份的打包与还原实现。
 pub mod zip_archive;
+/// Windows 无边框窗口镶边：命中测试子类化与 DWM 打磨（仅 Windows 编译）。
+#[cfg(windows)]
+pub mod window_chrome;
 /// versions/ 目录监控与稳定性判定的默认实现。
 pub mod watcher;

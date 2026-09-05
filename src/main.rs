@@ -29,8 +29,72 @@ fn main() {
         std::thread::spawn(move || start_watcher(&watcher_root, weak, &state));
     }
 
+    // 无边框窗口镶边（Windows）：原生窗口在事件循环启动并显示后才存在，
+    // 先调度安装，句柄未就绪则以短间隔重试。
+    install_frameless_chrome(ui.as_weak());
+
     ui.run().expect("UI 事件循环异常退出");
 }
+
+/**
+ * 函数职责：安装无边框窗口镶边（Windows）：命中测试子类化提供标题栏拖动、
+ *           八向边缘缩放与双击最大化，并开启 DWM 圆角与投影。
+ * 输入说明：weak 为主窗口弱引用。
+ * 输出说明：无返回值；窗口已销毁则静默放弃；句柄持续未就绪（重试耗尽）仅告警，
+ *           窗口仍可正常显示与操作，只是失去拖动/缩放。
+ * 实现思路：取 HWND（raw-window-handle）→ 注入几何探针（读取 UI 标题栏属性）→
+ *           infra 层安装子类；创建未完成时经事件循环定时器重试。
+ */
+#[cfg(windows)]
+fn install_frameless_chrome(weak: slint::Weak<PackPorterWindow>) {
+    const MAX_TRIES: u32 = 20;
+
+    fn hwnd_of(ui: &PackPorterWindow) -> Option<packporter::infra::window_chrome::NativeWindow> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let slint_handle = ui.window().window_handle();
+        let handle = slint_handle.window_handle().ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::Win32(win32) => {
+                Some(win32.hwnd.get() as packporter::infra::window_chrome::NativeWindow)
+            }
+            _ => None,
+        }
+    }
+
+    // 几何探针：命中测试时读取 UI 当前布局；窗口销毁后返回全零（无可拖动区）。
+    fn probe_of(ui: &PackPorterWindow) -> packporter::infra::window_chrome::GeometryProbe {
+        use packporter::infra::window_chrome::TitlebarGeometry;
+        let weak = ui.as_weak();
+        Box::new(move || {
+            let Some(ui) = weak.upgrade() else { return TitlebarGeometry::default() };
+            TitlebarGeometry {
+                caption_height: ui.get_titlebar_height(),
+                controls_x: ui.get_titlebar_controls_x(),
+                inline_client: (ui.get_titlebar_gear_start(), ui.get_titlebar_gear_end()),
+            }
+        })
+    }
+
+    fn attempt(weak: slint::Weak<PackPorterWindow>, tries_left: u32) {
+        let Some(ui) = weak.upgrade() else { return };
+        match hwnd_of(&ui) {
+            Some(hwnd) => unsafe {
+                packporter::infra::window_chrome::install(hwnd, probe_of(&ui));
+            },
+            None if tries_left > 0 => slint::Timer::single_shot(
+                std::time::Duration::from_millis(50),
+                move || attempt(weak, tries_left - 1),
+            ),
+            None => eprintln!("警告：未获取到原生窗口句柄，窗口拖动/缩放不可用"),
+        }
+    }
+
+    attempt(weak, MAX_TRIES);
+}
+
+/// 非 Windows 平台无原生镶边实现，保持入口装配一致。
+#[cfg(not(windows))]
+fn install_frameless_chrome(_weak: slint::Weak<PackPorterWindow>) {}
 
 /**
  * 结构职责：一份活跃的目录监控会话：服务 + 启动句柄。

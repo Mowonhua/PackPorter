@@ -46,6 +46,9 @@ fn run_all_inner() {
     let versions_root = make_fixture();
 
     let ui = PackPorterWindow::new().expect("创建主窗口失败");
+    // 无边框镶边几何：标题栏高度是静态常量，可在此锁定（Rust 命中测试依赖它划分拖动区）；
+    // 控制区起点 x 依赖真实窗口布局（未显示时窗口宽为 0），交由静态契约检查与实机冒烟覆盖。
+    assert_eq!(ui.get_titlebar_height(), 52.0, "标题栏高度应与自绘顶栏一致");
     let handles = attach(&ui, versions_root.clone(), Arc::new(|_: &str| {}));
 
     // attach 已对配置过的目录自动扫描：此处等待模型就绪后直接进入计划阶段。

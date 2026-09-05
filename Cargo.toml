@@ -5,8 +5,11 @@ edition = "2021"
 description = "Minecraft 整合包平滑迁移工具：将旧版本实例的个人资产安全迁移到新版本实例"
 
 [dependencies]
-# UI 框架：声明式 UI，编译期生成 Rust 绑定
-slint = "1"
+# UI 框架：声明式 UI，编译期生成 Rust 绑定；raw-window-handle-06 暴露原生窗口句柄，
+# 供无边框窗口的命中测试子类化取 HWND。
+slint = { version = "1", features = ["raw-window-handle-06"] }
+# 与 slint 的 raw-window-handle-06 feature 配套，用于匹配 RawWindowHandle::Win32。
+raw-window-handle = "0.6"
 # 序列化：版本 profile 解析、事务日志、应用配置持久化
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -23,6 +26,18 @@ chrono = { version = "0.4", features = ["clock"] }
 # 递归目录遍历（迁移计划扫描）
 walkdir = "2"
 rfd = { version = "0.15", default-features = false }
+
+# Windows 原生窗口镶边：命中测试子类化（标题栏拖动/边缘缩放/双击最大化）与 DWM 圆角投影。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 slint-build = "1"

@@ -3529,6 +3529,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "notify",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",
@@ -3537,6 +3538,7 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.20",
  "walkdir",
+ "windows-sys 0.60.2",
  "zip",
 ]
 
@@ -4526,6 +4528,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",
