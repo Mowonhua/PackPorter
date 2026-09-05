@@ -884,26 +884,89 @@ export component PackPorterWindow inherits Window {
                                 title: "自启动";
                                 SettingRow {
                                     label: "跟随启动器启动与退出";
+                                    vertical-stretch: 0;
                                     checked <=> root.settings-follow-launchers;
                                 }
 
-                                for path[index] in root.settings-launcher-paths: HorizontalLayout {
+                                Rectangle { height: 1px; background: #eef0f3; }
+
+                                HorizontalLayout {
+                                    spacing: 12px;
                                     Text {
-                                        text: path;
-                                        color: #374151;
-                                        wrap: word-wrap;
                                         horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                        text: "已关联的启动器";
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: #374151;
                                     }
                                     Button {
-                                        text: "移除";
+                                        text: root.launcher-selecting ? "选择中…" : "关联启动器…";
+                                        horizontal-stretch: 0;
+                                        min-width: 112px;
+                                        height: 32px;
                                         enabled: !root.settings-saving && !root.executing && !root.launcher-selecting;
-                                        clicked => { root.remove-launcher(index); }
+                                        clicked => { root.select-launcher(); }
                                     }
                                 }
-                                Button {
-                                    text: root.launcher-selecting ? "选择中…" : "关联启动器…";
-                                    enabled: !root.settings-saving && !root.executing && !root.launcher-selecting;
-                                    clicked => { root.select-launcher(); }
+
+                                if root.settings-launcher-paths.length == 0: Rectangle {
+                                    height: 44px;
+                                    border-radius: 6px;
+                                    background: #f7f8fa;
+                                    HorizontalLayout {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        Text {
+                                            text: "尚未关联启动器，点击右上方按钮添加";
+                                            color: #6b7280;
+                                            font-size: 12px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+
+                                for path[index] in root.settings-launcher-paths: Rectangle {
+                                    height: 48px;
+                                    background: transparent;
+                                    HorizontalLayout {
+                                        padding: 8px;
+                                        padding-left: 12px;
+                                        spacing: 12px;
+                                        path-viewport := Rectangle {
+                                            horizontal-stretch: 1;
+                                            min-width: 0px;
+                                            clip: true;
+                                            background: transparent;
+                                            // 长路径随选择光标横向滚动；裁剪限定在文本区域，避免覆盖移除按钮。
+                                            TextInput {
+                                                property <length> scroll-offset: 0px;
+                                                x: min(0px, max(parent.width - self.width, self.scroll-offset));
+                                                width: max(parent.width, self.preferred-width + self.text-cursor-width);
+                                                height: parent.height;
+                                                text: path;
+                                                read-only: true;
+                                                single-line: true;
+                                                vertical-alignment: center;
+                                                color: #374151;
+                                                cursor-position-changed(position) => {
+                                                    if position.x + self.x < 0px {
+                                                        self.scroll-offset = -position.x;
+                                                    } else if position.x + self.x > path-viewport.width - self.text-cursor-width {
+                                                        self.scroll-offset = path-viewport.width - self.text-cursor-width - position.x;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Button {
+                                            text: "移除";
+                                            horizontal-stretch: 0;
+                                            min-width: 64px;
+                                            height: 32px;
+                                            enabled: !root.settings-saving && !root.executing && !root.launcher-selecting;
+                                            clicked => { root.remove-launcher(index); }
+                                        }
+                                    }
                                 }
                             }
 
