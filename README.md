@@ -40,6 +40,8 @@ cargo run --example smoke_real -- "E:\你的\.minecraft\versions"   # 对真实�
 cargo build --release
 ```
 
+Windows 发布程序位于 `target/release/packporter.exe`，已内嵌应用图标；窗口、任务栏及自绘标题栏使用同一图标，不需要随程序分发图片。图标原图、PNG、多尺寸 ICO 和生成提示词见 [assets/icons/README.md](assets/icons/README.md)。
+
 ## 目录结构
 
 ```

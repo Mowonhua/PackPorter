@@ -461,6 +461,7 @@ component RuleDialog inherits Rectangle {
 // 无边框窗口：系统标题栏/边框由自绘顶栏与 Rust 命中测试子类替代（拖动/缩放/双击最大化）。
 export component PackPorterWindow inherits Window {
     title: "PackPorter";
+    icon: @image-url("../assets/icons/packporter.png");
     no-frame: true;
     preferred-width: 900px;
     preferred-height: 640px;
@@ -591,6 +592,16 @@ export component PackPorterWindow inherits Window {
                 spacing: 8px;
                 // 布局默认 stretch 会把齿轮摊到行尾与窗口按钮重叠，需显式靠左排布。
                 alignment: start;
+                Rectangle {
+                    width: 28px;
+                    Image {
+                        source: root.icon;
+                        width: 28px;
+                        height: 28px;
+                        y: (parent.height - self.height) / 2;
+                        image-fit: contain;
+                    }
+                }
                 Text {
                     text: "PackPorter";
                     font-size: 17px;
