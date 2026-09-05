@@ -70,6 +70,28 @@ fn launch(original: &Path, marker: &Path, fixture: &mut Fixture) {
     wait_for("原路径 shim 未释放可执行文件", || gateway.try_wait().unwrap().is_some());
 }
 
+/// Cargo 只向当前包的集成测试提供 CARGO_BIN_EXE，跨包 shim 从同一构建目录定位。
+/// workspace 全量测试会由 launcher 包的运行测试构建 shim；单跑本套件时须先构建它。
+/// 显式路径供自定义构建目录使用，指定后不可静默回退到其他产物。
+fn shim_executable() -> PathBuf {
+    let path = std::env::var_os("PACKPORTER_SHIM_EXE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let executable = std::env::current_exe().expect("无法定位测试程序");
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("测试程序应位于构建目录的 deps 子目录")
+                .join("packporter-shim.exe")
+        });
+    assert!(
+        path.is_file(),
+        "未找到 shim：{}。请先运行 cargo build -p packporter-launcher --bin packporter-shim，并与测试使用相同的 profile/target；也可设置 PACKPORTER_SHIM_EXE",
+        path.display()
+    );
+    path
+}
+
 #[test]
 fn original_paths_launch_and_disabling_restores_bak_while_launchers_are_running() {
     assert!(launcher_companion::acquire_ui_instance().unwrap().is_some(), "请先关闭 PackPorter 再运行原路径联动测试");
@@ -94,14 +116,14 @@ fn main() {
     let original = std::fs::read(&first).unwrap();
     let launchers = vec![first.clone(), second.clone()];
     let app = Path::new(env!("CARGO_BIN_EXE_packporter"));
-    let shim = Path::new(env!("CARGO_BIN_EXE_packporter-shim"));
+    let shim = shim_executable();
     let mut config = AppConfig {
         follow_launchers: true,
         launcher_paths: launchers.iter().map(|path| path.to_string_lossy().into_owned()).collect(),
         ..AppConfig::default()
     };
     assert!(config.save());
-    launcher_binding::apply_at(true, &launchers, app, shim, &directory).unwrap();
+    launcher_binding::apply_at(true, &launchers, app, &shim, &directory).unwrap();
     assert_eq!(std::fs::read(directory.join("PCL 中文.bak.exe")).unwrap(), original);
     launch(&first, &directory.join("first.txt"), &mut fixture);
     launch(&second, &directory.join("second.txt"), &mut fixture);
@@ -120,7 +142,7 @@ fn main() {
     // 复现设置保存次序：先写关闭状态，再还原入口；此时真实启动器仍在运行。
     config.follow_launchers = false;
     assert!(config.save());
-    launcher_binding::apply_at(false, &launchers, app, shim, &directory).unwrap();
+    launcher_binding::apply_at(false, &launchers, app, &shim, &directory).unwrap();
     for path in &launchers { assert_eq!(std::fs::read(path).unwrap(), original); }
     assert!(!directory.join("PCL 中文.bak.exe").exists());
     assert!(!directory.join("HMCL.bak.exe").exists());

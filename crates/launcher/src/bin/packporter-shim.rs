@@ -1,7 +1,7 @@
 //! 文件职责：独立启动器包装程序入口。
 //! 定义范围：命令行解析、错误呈现与 shim 基础设施调用。
 #![cfg_attr(windows, windows_subsystem = "windows")]
-use packporter::infra::launcher_shim::{self, ShimLaunch};
+use packporter_launcher::shim::{self as launcher_shim, ShimLaunch};
 use std::{ffi::OsString, path::PathBuf};
 
 const USAGE: &str = "用法：packporter-shim --launcher <启动器.exe 或 HMCL.jar> [--java <javaw.exe>] [--app <packporter.exe>] [-- <启动器参数...>]";
@@ -70,7 +70,7 @@ fn main() {
         .map_err(|error| error.to_string())
         .and_then(|executable| {
             // 受管原入口的所有参数属于启动器，必须先识别绑定再解析 shim 自身选项。
-            match packporter::infra::launcher_binding::read_binding(&executable)? {
+            match packporter_launcher::binding::read_binding(&executable)? {
                 Some(binding) => {
                     launcher_shim::handoff(binding, std::env::args_os().skip(1).collect())
                 }

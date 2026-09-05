@@ -51,10 +51,7 @@ fn compatible_launch_path(path: &std::path::Path) -> PathBuf {
 /// 将已通过 read_binding 验证的入口交给中央 shim，立即释放原路径 EXE 的运行锁。
 /// 原入口不得持有整个启动器会话，否则关闭设置时 Windows 无法删除并还原该文件。
 /// 中央程序缺失或不可用时仍启动已验证的备份；此时不提供 PackPorter 联动。
-pub fn handoff(
-    binding: crate::infra::launcher_binding::Binding,
-    arguments: Vec<OsString>,
-) -> Result<(), String> {
+pub fn handoff(binding: crate::binding::Binding, arguments: Vec<OsString>) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::process::Command;
     let central = binding.app.with_file_name("packporter-shim.exe");
@@ -65,10 +62,7 @@ pub fn handoff(
         && central != binding.launcher
         && std::fs::read(&central)
             .is_ok_and(|bytes| format!("{:x}", Sha256::digest(bytes)) == binding.shim_sha256)
-        && matches!(
-            crate::infra::launcher_binding::read_binding(&central),
-            Ok(None)
-        );
+        && matches!(crate::binding::read_binding(&central), Ok(None));
     if central_valid {
         let mut command = Command::new(central);
         command
@@ -120,7 +114,7 @@ pub fn launcher_count() -> Result<usize, String> {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use crate::{app_config::AppConfig, domain::launcher_lifecycle::is_launcher_process};
+    use crate::{process::is_launcher_process, settings};
     use serde::{Deserialize, Serialize};
     use std::{
         ffi::OsStr,
@@ -209,7 +203,7 @@ mod platform {
     }
 
     fn sessions_dir() -> Result<PathBuf, String> {
-        AppConfig::config_path()
+        settings::config_path()
             .and_then(|path| path.parent().map(|parent| parent.join("launcher-sessions")))
             .ok_or_else(|| "无法定位启动器会话目录".into())
     }
@@ -377,7 +371,7 @@ mod platform {
         };
         let mut command = command_line(executable.as_os_str(), &arguments)?;
         let directory = wide(launcher.parent().ok_or("启动器路径没有父目录")?.as_os_str());
-        let enabled = AppConfig::load().follow_launchers;
+        let enabled = settings::follow_launchers();
         let app = match launch.app {
             Some(app) => app,
             None => std::env::current_exe()
@@ -462,7 +456,7 @@ mod platform {
             .map_err(|error| format!("启动器已启动，但无法打开 PackPorter：{error}"))?;
         loop {
             // 关闭联动只撤销会话，不结束启动器。查询暂时失败时保留会话，避免误关 UI。
-            if !AppConfig::load().follow_launchers {
+            if !settings::follow_launchers() {
                 break;
             }
             if matches!(active(&job, &session), Ok(0)) {
@@ -495,7 +489,7 @@ mod platform {
         }
         #[test]
         fn missing_central_program_still_starts_original_with_its_working_directory() {
-            use crate::infra::launcher_binding::{apply_at, read_binding};
+            use crate::binding::{apply_at, read_binding};
             let directory = std::env::temp_dir().join(format!(
                 "packporter-shim-fallback-{}-{}",
                 std::process::id(),

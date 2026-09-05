@@ -5,7 +5,14 @@ edition = "2021"
 default-run = "packporter"
 description = "Minecraft 整合包平滑迁移工具：将旧版本实例的个人资产安全迁移到新版本实例"
 
+[workspace]
+members = ["crates/launcher"]
+# 根目录构建与测试同时覆盖 GUI 和 shim，发布目录始终包含两个入口。
+default-members = [".", "crates/launcher"]
+resolver = "2"
+
 [dependencies]
+packporter-launcher = { path = "crates/launcher" }
 # UI 框架：声明式 UI，编译期生成 Rust 绑定；raw-window-handle-06 暴露原生窗口句柄，
 # 供无边框窗口的命中测试子类化取 HWND。
 slint = { version = "1", features = ["raw-window-handle-06"] }

@@ -3578,6 +3578,7 @@ dependencies = [
  "chrono",
  "i-slint-backend-testing",
  "notify",
+ "packporter-launcher",
  "raw-window-handle",
  "rfd",
  "serde",
@@ -3591,6 +3592,18 @@ dependencies = [
  "windows-sys 0.60.2",
  "winresource",
  "zip",
+]
+
+[[package]]
+name = "packporter-launcher"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "windows-sys 0.60.2",
+ "winresource",
 ]
 
 [[package]]

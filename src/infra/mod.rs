@@ -18,7 +18,7 @@ pub mod window_chrome;
 pub mod watcher;
 
 /// 独立包装入口及命名启动器会话。
-pub mod launcher_shim;
+pub use packporter_launcher::shim as launcher_shim;
 
 /// 原路径启动器入口的可逆安装及恢复。
 pub mod launcher_binding;

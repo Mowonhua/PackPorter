@@ -10,7 +10,7 @@ use crate::domain::rules::{level_default_description, RuleRegistry, L1_ASSETS, L
 // ==================== 常量、枚举和类型别名 ====================
 
 /// 配置文件名，存放于用户配置目录的 packporter 子目录下。
-pub const CONFIG_FILE_NAME: &str = "config.json";
+pub use packporter_launcher::settings::CONFIG_FILE_NAME;
 
 // ==================== 数据结构、值对象和 DTO ====================
 
@@ -204,11 +204,7 @@ impl AppConfig {
      *           回退 USER_PROFILE。
      */
     pub fn config_path() -> Option<PathBuf> {
-        if let Ok(dir) = std::env::var("PACKPORTER_CONFIG_DIR") {
-            return Some(PathBuf::from(dir).join(CONFIG_FILE_NAME));
-        }
-        let base = std::env::var("APPDATA").ok().or_else(|| std::env::var("USER_PROFILE").ok())?;
-        Some(PathBuf::from(base).join("packporter").join(CONFIG_FILE_NAME))
+        packporter_launcher::settings::config_path()
     }
 
     /**

@@ -58,13 +58,13 @@ jobs:
         # ui_wiring 需要真实事件循环；软件渲染避免依赖托管 runner 的 GPU。
         env:
           SLINT_BACKEND: winit-software
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Build release executable
         # 静态链接 MSVC 运行库，使分发包无需另行安装 VC++ Redistributable。
         env:
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --locked --release --target x86_64-pc-windows-msvc --bins
+        run: cargo build --workspace --locked --release --target x86_64-pc-windows-msvc --bins
 
       - name: Test shim launcher sessions
         env:

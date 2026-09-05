@@ -51,7 +51,16 @@ cargo run
 cargo build --release
 ```
 
-Windows 产物为 `target/release/packporter.exe`。应用图标已嵌入程序，无需额外分发图片。
+Windows 产物为 `target/release/packporter.exe` 和 `target/release/packporter-shim.exe`。两个程序均已嵌入图标，无需额外分发图片。
+
+只修改启动器逻辑时，可单独构建和测试 shim，不会编译 Slint 或 GUI 主程序：
+
+```powershell
+cargo build -p packporter-launcher --release --bin packporter-shim
+cargo test -p packporter-launcher
+```
+
+根目录的 `cargo build --release` 和 `cargo test` 默认覆盖两个包。只修改 GUI 时可用 `cargo build -p packporter --release`；完整分发仍需将两个程序放在同一目录。
 
 设置中点击**关联启动器…**，选择 PCL2 / HMCL 的 `.exe`，开启联动并保存。保存前的选择只是草稿；保存成功后原文件备份为同目录的 `xxx.bak.exe`，原 `xxx.exe` 路径由 shim 接管。因此直接双击原路径、使用已有快捷方式或命令行都能联动。可关联多个启动器，最后一个关联启动器退出后 PackPorter 自动关闭，迁移和设置保存会先完成。
 
@@ -128,6 +137,7 @@ src/
   infra/         JSON 解析、文件操作、进程探测、Zip 与目录监控
   app_config.rs  用户配置持久化
   main.rs        Slint UI 装配
+crates/launcher/  独立启动器库与 packporter-shim；不依赖 GUI
 ui/              界面与动效
 tests/           集成与 UI 回调测试
 examples/        只读扫描示例与备份基准
@@ -139,6 +149,10 @@ cargo test
 # 对实际 versions 目录执行只读扫描
 cargo run --example smoke_real -- "E:\你的\.minecraft\versions"
 ```
+
+单独运行根包的 `launcher_binding_runtime` 测试前，需先构建相同 profile/target 的 shim；该测试也支持通过 `PACKPORTER_SHIM_EXE` 指定待测程序。工作区完整测试会自动构建两个程序。
+
+GUI 和 shim 共用配置文件位置。shim 只读取 `follow_launchers`，忽略迁移配置字段；文件不可读、JSON 损坏或开关类型错误时按关闭处理。运行中的 shim 会重新读取开关，关闭联动后释放会话。
 
 `smoke_real` 的合并预览仅在实例目录名分别包含 `0.9.3` 和 `0.9.6` 时执行，否则跳过该部分。
 
