@@ -94,6 +94,8 @@ fn run_all_inner() {
     ui.invoke_open_settings();
     ui.invoke_open_rule_dialog(1);
     assert!(api.invoke_add(1, "persisted/".into()), "持久化用新增路径应成功");
+    assert!(api.invoke_add(4, "initialized.txt".into()), "初始化设置规则应成功");
+    assert!(api.invoke_add(4, "empty-target.txt".into()), "空目标设置规则应成功");
     ui.set_rule_dialog_visible(false);
     // 配置中 versions 目录为空，保存前需填入合法目录（fixture 根）。
     ui.set_settings_versions_dir(versions_root.to_string_lossy().to_string().into());
@@ -157,6 +159,15 @@ fn run_all_inner() {
                         "计划预览区应有明细行"
                     );
                     assert!(!ui.get_plan_summary().is_empty(), "计划摘要不应为空");
+                    for (path, expected) in [
+                        ("options.txt", "合并个人设置 4 项，未验证键位 1"),
+                        ("initialized.txt", "初始化个人设置 2 项，未验证键位 1"),
+                        ("empty-target.txt", "合并个人设置 1 项"),
+                    ] {
+                        let row = ui.get_plan_entries().iter().find(|row| row.path == path)
+                            .unwrap_or_else(|| panic!("缺少设置预览行：{path}"));
+                        assert_eq!(row.action_label, expected, "设置预览应区分目标状态：{path}");
+                    }
                     assert!(!ui.get_lock_warning_visible(), "无占用时警告不应显示");
                     assert!(
                         ui.get_status_text().contains("已生成迁移计划"),
@@ -179,8 +190,8 @@ fn run_all_inner() {
                         ui.get_status_kind()
                     );
                     assert!(
-                        ui.get_status_text().contains("共复制") && ui.get_status_text().contains("合并键位"),
-                        "完成状态应含复制数与合并键位数，实际：{}",
+                        ui.get_status_text().contains("共复制") && ui.get_status_text().contains("合并设置"),
+                        "完成状态应含复制数与合并设置数，实际：{}",
                         ui.get_status_text()
                     );
                     assert_eq!(ui.get_progress_percent(), 100, "完成后进度应为 100%");
@@ -190,6 +201,10 @@ fn run_all_inner() {
                     let options = std::fs::read_to_string(target.join("options.txt")).unwrap();
                     assert!(options.contains("language:zh_CN"), "L4 合并应写入旧值语言键");
                     assert!(options.contains("new_mod_key:2"), "L4 合并应保留新版新增键");
+                    assert!(options.contains("key_mod.jump:key.keyboard.r"), "未验证键位应实际保留");
+                    let initialized = std::fs::read_to_string(target.join("initialized.txt")).unwrap();
+                    assert!(initialized.contains("language:zh_CN"), "缺失目标应初始化个人偏好");
+                    assert!(initialized.contains("key_mod.jump:key.keyboard.r"), "初始化应写入未验证键位");
                     assert!(
                         target.join("saves/world1/level.dat").exists(),
                         "L1 存档应已复制"
@@ -250,10 +265,13 @@ fn make_fixture() -> PathBuf {
     std::fs::write(old.join("resourcepacks/old_pack.zip"), "oldpack").unwrap();
     std::fs::write(
         old.join("options.txt"),
-        "language:zh_CN\nsoundCategory_master:0.5\nold_mod_key:1\n",
+        "language:zh_CN\nsoundCategory_master:0.5\nold_mod_key:1\nkey_mod.jump:key.keyboard.r\n",
     )
     .unwrap();
     std::fs::write(new.join("options.txt"), "language:en_US\nnew_mod_key:2\n").unwrap();
+    std::fs::write(old.join("initialized.txt"), "language:zh_CN\nkey_mod.jump:key.keyboard.r\n").unwrap();
+    std::fs::write(old.join("empty-target.txt"), "language:zh_CN\n").unwrap();
+    std::fs::write(new.join("empty-target.txt"), "").unwrap();
 
     // 版本 json：让扫描产出可读的 MC 版本号（缺失也不影响扫描）。
     std::fs::write(old.join("1.16.5_Old.json"), r#"{"minecraft_version":"1.16.5"}"#).unwrap();

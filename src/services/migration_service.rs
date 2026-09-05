@@ -100,12 +100,16 @@ impl MigrationService {
             let entry = match rule.level {
                 AssetLevel::SmartMerge => {
                     // L4：按规则自身路径定位偏好文件，预合并并随计划携带明细；
-                    // 源文件缺失视为空条目（新装实例可能尚未生成该文件）。
+                    // 仅源文件确实缺失时跳过；读取错误必须阻断规划并向 UI 传播。
                     let old_path = source.root_dir.join(&rule.relative_path);
-                    let result = if old_path.exists() {
-                        self.merge_engine
-                            .merge_options(&old_path, &target.root_dir.join(&rule.relative_path))
-                            .ok()
+                    let source_exists = old_path.try_exists().map_err(|error| PackError::FileSystem {
+                        operation: "read".to_string(),
+                        path: old_path.display().to_string(),
+                        message: error.to_string(),
+                    })?;
+                    let result = if source_exists {
+                        Some(self.merge_engine
+                            .merge_options(&old_path, &target.root_dir.join(&rule.relative_path))?)
                     } else {
                         None
                     };
@@ -167,7 +171,7 @@ impl MigrationService {
         let actions = self.to_actions(plan);
         let applied = engine.execute(&actions, progress)?;
 
-        // 汇总面向用户的单行成功报告：只报复制文件数与合并键位数，保持极简。
+        // 设置数量包含键位和普通偏好，按写入的设置项统计。
         let copied = plan
             .entries
             .iter()
@@ -179,7 +183,7 @@ impl MigrationService {
             success: true,
             rolled_back: false,
             moved_items: applied,
-            report: format!("共复制{copied}项，合并键位{merged_keys}项"),
+            report: format!("共复制{copied}项，合并设置{merged_keys}项"),
         })
     }
 

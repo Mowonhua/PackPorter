@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /**
  * 结构职责：单个 options 键的合并裁决。
- * 字段说明：枚举项覆盖需求中的全部策略：保留新版、采用旧版、强制采用旧版、智能忽略。
+ * 字段说明：区分保留新值、采用旧偏好、采用旧绑定、保留未验证绑定与忽略遗留键。
  * 约束条件：同一键只能有一个裁决；KeepNew 是缺省裁决。
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,8 +18,22 @@ pub enum MergeAction {
     TakeOld,
     /// 键位类 key_ 前缀：旧值优先，即使新版默认值不同。
     TakeOldBinding,
-    /// 旧版键在新版已被移除或改名：智能忽略，不写入新版。
+    /// 目标未列出该键位，保留旧绑定，但尚未验证目标是否支持。
+    TakeUnverifiedBinding,
+    /// 旧版独有且未获准迁移的键或非法偏好值：不写入新版。
     DropLegacy,
+}
+
+/**
+ * 结构职责：区分初始化缺失文件与合并已有配置。
+ * 字段说明：Initialize 仅用于确认目标文件不存在；Merge 用于已有文件或纯映射合并。
+ * 约束条件：空文件仍属于 Merge；读取错误不得转换成 Initialize。
+ */
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptionsMergeMode {
+    Initialize,
+    #[default]
+    Merge,
 }
 
 // ==================== 数据结构、值对象和 DTO ====================
@@ -44,10 +58,13 @@ pub struct MergeOutcome {
 /**
  * 结构职责：一次 MergeOptions 的整体合并结果。
  * 字段说明：outcomes 保序（按新文件键序优先，旧版独有键追加在后）。
- * 约束条件：merged 序列化后必须能被原样写回 options.txt 且可被游戏解析。
+ * 约束条件：merged 可序列化为 options 文本；未验证绑定不代表目标版本支持该键位。
  */
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeResult {
+    /// 文件读取边界确认的处理模式；纯映射调用不推断文件存在性。
+    #[serde(default)]
+    pub mode: OptionsMergeMode,
     /// 逐键决策明细。
     pub outcomes: Vec<MergeOutcome>,
     /// 需要写入新文件的完整键值对（已合并）。

@@ -90,17 +90,17 @@ fn unknown_legacy_keys_are_dropped() {
 }
 
 #[test]
-fn obsolete_binding_dropped_but_rebindable_binding_kept() {
-    // 新版键位族只含 jump；旧版 pickItem 已淘汰，sneak 仍在（补清场景：新版缺失旧键位）。
+fn partial_target_preserves_unlisted_binding_as_unverified() {
+    // 目标可能只预置部分键位，缺项不能作为淘汰证据。
     let result = engine().merge_maps(
         &map(&[("key_key.pickItem", "key.mouse.middle"), ("key_key.sneak", "key.keyboard.left.shift")]),
         &map(&[("key_key.jump", "key.keyboard.space"), ("key_key.sneak", "key.keyboard.shift.right")]),
     );
-    // pickItem 不在新版键族：淘汰忽略。
+    // 未列出的绑定保留，但明确标记支持情况尚未验证。
     let pick = result.outcomes.iter().find(|o| o.key == "key_key.pickItem").unwrap();
-    assert_eq!(pick.action, MergeAction::DropLegacy);
-    assert!(!result.merged.iter().any(|(k, _)| k == "key_key.pickItem"));
-    // sneak 在新版键族存在但本次旧版为独有键：补清写入旧值。
+    assert_eq!(pick.action, MergeAction::TakeUnverifiedBinding);
+    assert!(result.merged.iter().any(|(k, v)| k == "key_key.pickItem" && v == "key.mouse.middle"));
+    // 双方同名绑定仍采用旧值。
     assert!(result.merged.iter().any(|(k, v)| k == "key_key.sneak" && v == "key.keyboard.left.shift"));
 }
 
@@ -125,9 +125,15 @@ fn missing_new_file_initializes_from_old() {
     std::fs::write(&old, "fov:0.9\nkey_key.jump:key.keyboard.space\nlang:zh_cn\n").unwrap();
     let _ = std::fs::remove_file(&new);
     let result = engine().merge_options(&old, &new).unwrap();
+    assert_eq!(result.mode, packporter::domain::merge::OptionsMergeMode::Initialize);
     // 新版文件缺失：等价于以旧值初始化白名单键。
     assert!(result.merged.iter().any(|(k, v)| k == "fov" && v == "0.9"));
     assert!(result.merged.iter().any(|(k, v)| k == "key_key.jump" && v == "key.keyboard.space"));
+    assert_eq!(result.outcomes.iter().find(|o| o.key == "key_key.jump").unwrap().action,
+        MergeAction::TakeUnverifiedBinding);
+    std::fs::write(&new, "").unwrap();
+    let existing_empty = engine().merge_options(&old, &new).unwrap();
+    assert_eq!(existing_empty.mode, packporter::domain::merge::OptionsMergeMode::Merge);
 }
 
 #[test]
@@ -143,6 +149,40 @@ fn serialize_roundtrip_matches_key_value_lines() {
     // 重新解析应与 merged 一致（往返稳定性）。
     let reparsed = KeyValueParser.parse(&text);
     assert_eq!(reparsed.entries.get("fov").unwrap(), "0.5");
+}
+
+#[test]
+fn planning_reports_options_read_errors_without_changing_files() {
+    use packporter::domain::error::PackError;
+    use packporter::domain::instance::MigrationOptions;
+    use packporter::services::migration_service::MigrationService;
+
+    let base = std::env::temp_dir().join("packporter_options_read_errors");
+    let _ = std::fs::remove_dir_all(&base);
+    let old = base.join("Old");
+    let new = base.join("New");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&new).unwrap();
+    let service = MigrationService::new(base.clone());
+    let instances = service.instances.scan_instances().unwrap();
+    let source = instances.iter().find(|p| p.version.dir_name == "Old").unwrap();
+    let target = instances.iter().find(|p| p.version.dir_name == "New").unwrap();
+
+    // 无效 UTF-8 能稳定触发读取失败，不依赖操作系统权限或当前用户身份。
+    for broken_path in [new.join("options.txt"), old.join("options.txt")] {
+        std::fs::write(old.join("options.txt"), "fov:0.8\n").unwrap();
+        std::fs::write(new.join("options.txt"), "fov:0.4\n").unwrap();
+        std::fs::write(&broken_path, [0xff, 0xfe]).unwrap();
+        let result = service.plan_migration(source, target, MigrationOptions::all_enabled());
+        assert!(matches!(result, Err(PackError::FileSystem { path, operation, .. })
+            if path == broken_path.display().to_string() && operation == "read"));
+        assert_eq!(std::fs::read(&broken_path).unwrap(), [0xff, 0xfe]);
+    }
+    // 源文件确实缺失时无需迁移，与无法读取明确区分。
+    std::fs::remove_file(old.join("options.txt")).unwrap();
+    let plan = service.plan_migration(source, target, MigrationOptions::all_enabled()).unwrap();
+    assert!(plan.options_results.is_empty());
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

@@ -8,6 +8,7 @@ use crate::domain::error::{PackError, PackResult};
 use crate::domain::instance::{
     AssetLevel, DecisionAction, InstanceProfile, MigrationPlan, MigrationProgress,
 };
+use crate::domain::merge::{MergeAction, OptionsMergeMode};
 use crate::domain::rules::{normalize_rule_path, rules_conflict};
 use crate::services::migration_service::MigrationService;
 use crate::{PlanEntryView, PackPorterWindow, RuleEditorApi, RuleRowView};
@@ -602,7 +603,7 @@ impl CtxShare {
  * 函数职责：将生成的迁移计划渲染到预览区（摘要 + 逐规则明细行）。
  * 输入说明：ui 为窗口引用；plan 为 plan_migration 产物。
  * 输出说明：副作用为更新 plan-summary、plan-entries、plan-ready 并清除结果卡片。
- * 实现思路：逐条目统计复制/保留数量，L4 条目（无文件决策）按合并键数生成动作标签；
+ * 实现思路：逐条目统计复制/保留数量，L4 条目按处理模式、设置总数与未验证键位数生成动作标签；
  *           摘要中列出被设置关闭而跳过的级别。
  */
 fn apply_plan(ui: &PackPorterWindow, plan: &MigrationPlan) {
@@ -620,13 +621,28 @@ fn apply_plan(ui: &PackPorterWindow, plan: &MigrationPlan) {
                 .iter()
                 .filter(|d| d.action == DecisionAction::KeepNew)
                 .count();
-            // L4 条目 decisions 为空，动作标签按合并键数表达；空条目明确标示无需处理。
-            let action_label = if copied + kept == 0 {
-                if entry.total_items > 0 {
-                    format!("智能合并 {} 个键位", entry.total_items)
-                } else {
-                    "无需处理".to_string()
-                }
+            // 文件是否缺失由规划时的读取结果决定，预览不可再根据设置数量推断初始化。
+            let action_label = if entry.rule.level == AssetLevel::SmartMerge {
+                plan.options_results.iter()
+                    .find(|outcome| outcome.relative_path == entry.rule.relative_path)
+                    .map(|outcome| {
+                        let result = &outcome.result;
+                        let mode = match result.mode {
+                            OptionsMergeMode::Initialize => "初始化个人设置",
+                            OptionsMergeMode::Merge => "合并个人设置",
+                        };
+                        let unverified = result.outcomes.iter()
+                            .filter(|item| item.action == MergeAction::TakeUnverifiedBinding)
+                            .count();
+                        let mut label = format!("{mode} {} 项", result.merged.len());
+                        if unverified > 0 {
+                            label.push_str(&format!("，未验证键位 {unverified}"));
+                        }
+                        label
+                    })
+                    .unwrap_or_else(|| "无需处理".to_string())
+            } else if copied + kept == 0 {
+                "无需处理".to_string()
             } else if kept == 0 {
                 format!("复制 {copied} 项")
             } else {
@@ -687,7 +703,7 @@ fn plan_summary_text(plan: &MigrationPlan) -> String {
         format!("；已按设置跳过：{}", skipped.join("、"))
     };
     format!(
-        "源 {} → 目标 {} · {} 类资产 · 共 {} 项文件/键位{}",
+        "源 {} → 目标 {} · {} 类资产 · 共 {} 项文件/设置{}",
         plan.source.version.dir_name,
         plan.target.version.dir_name,
         plan.entries.len(),

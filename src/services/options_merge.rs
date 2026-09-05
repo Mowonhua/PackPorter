@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::domain::error::PackResult;
 use crate::domain::instance::{OptionsParser, ParsedOptions};
-use crate::domain::merge::{MergeAction, MergeOutcome, MergePolicy, MergeResult};
+use crate::domain::merge::{MergeAction, MergeOutcome, MergePolicy, MergeResult, OptionsMergeMode};
 
 // ==================== 常量、枚举和类型别名 ====================
 
@@ -58,7 +58,8 @@ impl OptionsMergeEngine {
      * 函数职责：将旧版 options 按白名单规则合并进新版 options，返回合并结果。
      * 输入说明：old_options_path 为旧实例 options.txt；new_options_path 为新实例 options.txt。
      *           新文件可能尚不存在（全新解压实例），此时以旧值初始化全部白名单键。
-     * 输出说明：返回逐键决策与最终键值序列；任一路径不可读时返回 FileSystem 错误。
+     * 输出说明：返回处理模式、逐键决策与最终键值序列；目标缺失为 Initialize，
+     *           已有文件（含空文件）为 Merge；其他读取失败返回 FileSystem 错误。
      *           本方法不写任何文件，写入由事务执行器完成。
      * 实现思路：读两份文本（新版缺失按空文本处理）→ parser.parse → 委托 merge_maps。
      */
@@ -75,31 +76,35 @@ impl OptionsMergeEngine {
                 message: e.to_string(),
             }
         })?;
-        // 新版可能尚未生成（全新实例），缺失时按空文本合并。
-        let new_raw = std::fs::read_to_string(new_options_path).unwrap_or_default();
+        // 只有 NotFound 表示可初始化；读取失败不能冒充空配置，否则可能丢失目标设置。
+        let (new_raw, mode) = match std::fs::read_to_string(new_options_path) {
+            Ok(raw) => (raw, OptionsMergeMode::Merge),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (String::new(), OptionsMergeMode::Initialize)
+            }
+            Err(error) => return Err(crate::domain::error::PackError::FileSystem {
+                operation: "read".to_string(),
+                path: new_options_path.display().to_string(),
+                message: error.to_string(),
+            }),
+        };
         let old_map = self.parser.parse(&old_raw);
         let new_map = self.parser.parse(&new_raw);
-        Ok(self.merge_maps(&old_map, &new_map))
+        let mut result = self.merge_maps(&old_map, &new_map);
+        result.mode = mode;
+        Ok(result)
     }
 
     /**
      * 函数职责：对内存中的两份键值映射执行纯合并（无文件 IO），供测试与 UI 预览复用。
      * 输入说明：old_map 与 new_map 为已解析键值对。
-     * 输出说明：合并结果，语义与 merge_options 完全一致。
-     * 实现思路：以新版键序为骨架逐键 classify；键位键先收集新版键族集合以判定淘汰；
-     *           旧版独有键区分键位（补清）与遗留键（忽略）；值合法性校验失败回退 KeepNew。
+     * 输出说明：键值决策与 merge_options 一致；模式固定为 Merge，不推断文件存在性。
+     * 实现思路：以新版键序为骨架逐键 classify；目标未列出的旧键位保留并标记未验证；
+     *           旧版独有键区分键位（保留）与遗留键（忽略）；值合法性校验失败回退 KeepNew。
      */
     pub fn merge_maps(&self, old_map: &ParsedOptions, new_map: &ParsedOptions) -> MergeResult {
         let mut outcomes: Vec<MergeOutcome> = Vec::new();
         let mut merged: Vec<(String, String)> = Vec::new();
-
-        // 收集新版键位族集合，供淘汰键位判定。
-        let new_binding_keys: Vec<&str> = new_map
-            .entries
-            .keys()
-            .filter(|k| k.starts_with(KEY_BINDING_PREFIX))
-            .map(|k| k.as_str())
-            .collect();
 
         // 第一遍：以新版键序为骨架，逐键裁决。
         for (key, new_value) in &new_map.entries {
@@ -160,37 +165,24 @@ impl OptionsMergeEngine {
             merged.push((key.clone(), final_value));
         }
 
-        // 第二遍：处理旧版独有键。键位键补清写入，其余遗留键智能忽略。
+        // 第二遍：处理旧版独有键。键位键保留并标记未验证，其余遗留键智能忽略。
         let mut dropped = 0usize;
         for (key, old_value) in &old_map.entries {
             if new_map.entries.contains_key(key) {
                 continue;
             }
             if key.starts_with(KEY_BINDING_PREFIX) {
-                // 新版键族中不存在的键位视为淘汰；仍存在的旧键位补清进新版。
-                if crate::infra::key_value::WhitelistPolicy::is_obsolete_binding(
-                    key,
-                    &new_binding_keys,
-                ) {
-                    dropped += 1;
-                    outcomes.push(MergeOutcome {
-                        key: key.clone(),
-                        action: MergeAction::DropLegacy,
-                        old_value: Some(old_value.clone()),
-                        new_value: None,
-                    });
-                } else {
-                    outcomes.push(MergeOutcome {
-                        key: key.clone(),
-                        action: MergeAction::TakeOldBinding,
-                        old_value: Some(old_value.clone()),
-                        new_value: None,
-                    });
-                    merged.push((key.clone(), old_value.clone()));
-                }
+                // 配置文件可能仅预置部分设置，未列出不代表目标不支持该绑定。
+                outcomes.push(MergeOutcome {
+                    key: key.clone(),
+                    action: MergeAction::TakeUnverifiedBinding,
+                    old_value: Some(old_value.clone()),
+                    new_value: None,
+                });
+                merged.push((key.clone(), old_value.clone()));
             } else if crate::infra::key_value::WhitelistPolicy::is_whitelisted(key) {
                 // 白名单偏好键（音量/视角/语言）：新版缺失不代表被淘汰——
-                // options.txt 只存非默认值，全新实例常缺失这些键，应采用旧值。
+                // 目标可能尚未初始化或仅预置部分设置，因此允许补入合法旧值。
                 if crate::infra::key_value::WhitelistPolicy::value_is_plausible(key, old_value) {
                     outcomes.push(MergeOutcome {
                         key: key.clone(),
@@ -220,7 +212,7 @@ impl OptionsMergeEngine {
             }
         }
 
-        MergeResult { outcomes, merged, dropped }
+        MergeResult { outcomes, merged, dropped, mode: Default::default() }
     }
 
     /**
@@ -274,7 +266,7 @@ pub fn summarize(outcomes: &[MergeOutcome]) -> String {
     let mut dropped = 0usize;
     for outcome in outcomes {
         match outcome.action {
-            MergeAction::TakeOldBinding => bindings += 1,
+            MergeAction::TakeOldBinding | MergeAction::TakeUnverifiedBinding => bindings += 1,
             MergeAction::TakeOld => preferences += 1,
             MergeAction::KeepNew => kept_new += 1,
             MergeAction::DropLegacy => dropped += 1,

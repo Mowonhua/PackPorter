@@ -46,7 +46,7 @@ pub struct WhitelistPolicy;
 
 impl MergePolicy for WhitelistPolicy {
     fn classify(&self, key: &str, new_exists: bool) -> MergeAction {
-        // 键位绑定族：旧值优先；新版缺失的旧键位由引擎依据键族集合判定淘汰。
+        // 键位绑定族：旧值优先；目标未列出的旧键位由引擎保留并标记未验证。
         if key.starts_with(KEY_BINDING_PREFIX) {
             return MergeAction::TakeOldBinding;
         }
@@ -105,21 +105,4 @@ impl WhitelistPolicy {
         true
     }
 
-    /**
-     * 函数职责：判断旧键位是否属于"新版已淘汰键"（新版键族中不再存在的键位）。
-     * 输入说明：key 为旧版键位键；new_binding_keys 为新版全部键位键集合。
-     * 输出说明：新版键位族非空且不含同名键位时返回 true（应 DropLegacy）。
-     * 实现思路：仅对 key_ 前缀生效；键位族为空表示新版文件缺失（族信息未知），
-     *           此时无法判定淘汰，一律按可迁移键位处理（初始化模式）。
-     */
-    pub fn is_obsolete_binding(key: &str, new_binding_keys: &[&str]) -> bool {
-        if !key.starts_with(KEY_BINDING_PREFIX) {
-            return false;
-        }
-        // 键位族未知时不得判定淘汰：全新实例的 options.txt 尚未生成。
-        if new_binding_keys.is_empty() {
-            return false;
-        }
-        !new_binding_keys.contains(&key)
-    }
 }
