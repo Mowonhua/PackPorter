@@ -292,7 +292,14 @@ export component PackPorterWindow inherits Window {
                 }
                 titlebar-gear := GearButton {
                     enabled: !root.busy;
-                    clicked => { root.open-settings(); }
+                    // 开合开关：设置页已打开时再点即关闭（走取消路径，不落任何改动）。
+                    clicked => {
+                        if (root.settings-open) {
+                            root.cancel-settings();
+                        } else {
+                            root.open-settings();
+                        }
+                    }
                 }
             }
             titlebar-controls := Rectangle {

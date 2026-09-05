@@ -79,6 +79,11 @@ if ($main -notmatch 'install_frameless_chrome') {
     $failures += '入口未安装无边框窗口镶边（install_frameless_chrome）'
 }
 
+# 契约 5：设置齿轮为开合开关：点击处理器按 settings-open 在打开/取消回调间切换。
+if ($slint -notmatch '(?s)titlebar-gear\s*:=\s*GearButton\s*\{.{0,400}?root\.settings-open.{0,200}?root\.cancel-settings\(\).{0,200}?root\.open-settings\(\)') {
+    $failures += '设置齿轮未按 settings-open 切换 open/cancel 回调（开合开关）'
+}
+
 if ($failures.Count -gt 0) {
     Write-Host 'UI 接线契约检查未通过：'
     $failures | ForEach-Object { Write-Host "  - $_" }

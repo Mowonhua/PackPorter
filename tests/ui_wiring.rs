@@ -51,6 +51,12 @@ fn run_all_inner() {
     assert_eq!(ui.get_titlebar_height(), 52.0, "标题栏高度应与自绘顶栏一致");
     let handles = attach(&ui, versions_root.clone(), Arc::new(|_: &str| {}));
 
+    // 设置页开合：open 置位、cancel 复位（顶栏齿轮的开合开关依赖这对回调语义）。
+    ui.invoke_open_settings();
+    assert!(ui.get_settings_open(), "open-settings 应打开设置页");
+    ui.invoke_cancel_settings();
+    assert!(!ui.get_settings_open(), "cancel-settings 应关闭设置页");
+
     // attach 已对配置过的目录自动扫描：此处等待模型就绪后直接进入计划阶段。
     let weak_ui = ui.as_weak();
     let timer = std::rc::Rc::new(slint::Timer::default());
